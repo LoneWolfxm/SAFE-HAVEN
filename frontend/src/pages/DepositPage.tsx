@@ -1,13 +1,17 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
-import { usePrice } from '../hooks/usePrice'
+import { useContractLogs } from '../context/ContractLogsContext'
 import { TxStatusBadge } from '../components/TxStatusBadge'
-import { buildDeposit, submitTx } from '../lib/stellar'
-import { xlmToStroops, stroopsToXlm, formatBps, formatTokenWithUsd, formatPriceUpdate } from '../lib/format'
+import { LockByLedgerForm } from '../components/LockByLedgerForm'
+import { buildDeposit, submitTx, getTokenDecimals, getTokenMetadata } from '../lib/stellar'
+import { formatBps, formatDuration, dateTimeLocalToUnixSeconds, getMinDateTimeLocal, formatUnlockTimestampWithTimezone, getTimezoneOffsetString, amountToBaseUnits, baseUnitsToAmount, isValidContractAddress, validateTokenAddress } from '../lib/format'
 import type { TxStatus } from '../types'
 import type { ContractInfo } from '../App'
 import { CONFIG } from '../config'
+import { Address, nativeToScVal } from '@stellar/stellar-sdk'
+
+type DepositTab = 'timestamp' | 'ledger'
 
 interface DepositPageProps {
   contractInfo: ContractInfo
@@ -15,8 +19,11 @@ interface DepositPageProps {
 }
 
 export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
-  const { wallet, signTransaction } = useWallet()
-  const { getPrice } = usePrice()
+  const { wallet, isRestoringSession, signTransaction } = useWallet()
+  const { addLog, updateLog } = useContractLogs()
+
+  // Deposit tab state
+  const [depositTab, setDepositTab] = useState<DepositTab>('timestamp')
 
   const [tokenAddress, setTokenAddress] = useState<string>(CONFIG.NATIVE_TOKEN)
   const [amount,       setAmount]       = useState('')
@@ -27,28 +34,109 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   const [txHash,   setTxHash]   = useState<string | undefined>()
   const [txError,  setTxError]  = useState<string | undefined>()
 
+  // Token decimals state — defaults to 7 (XLM) but updates when token changes
+  const [tokenDecimals, setTokenDecimals] = useState<number>(7)
+  const [decimalsLoading, setDecimalsLoading] = useState(false)
+
+  // Token metadata state for verification
+  const [tokenMetadata, setTokenMetadata] = useState<{ name: string; symbol: string } | null>(null)
+  const [tokenAddressError, setTokenAddressError] = useState<string>('')
+
+  // Fetch token decimals when token address changes
+  useEffect(() => {
+    if (!tokenAddress || tokenAddress === CONFIG.NATIVE_TOKEN) {
+      setTokenDecimals(7)
+      setDecimalsLoading(false)
+      setTokenMetadata(null)
+      setTokenAddressError('')
+      return
+    }
+
+    // Validate format first
+    const validation = validateTokenAddress(tokenAddress)
+    if (!validation.valid) {
+      setTokenAddressError(validation.message)
+      setTokenDecimals(7)
+      setTokenMetadata(null)
+      setDecimalsLoading(false)
+      return
+    }
+
+    setTokenAddressError('')
+    setDecimalsLoading(true)
+
+    // Fetch both decimals and metadata in parallel
+    Promise.all([getTokenDecimals(tokenAddress), getTokenMetadata(tokenAddress)]).then(
+      ([decimals, metadata]) => {
+        if (decimals !== null) {
+          setTokenDecimals(decimals)
+        } else {
+          setTokenDecimals(7)
+        }
+        if (metadata) {
+          setTokenMetadata(metadata)
+        }
+        setDecimalsLoading(false)
+      },
+    ).catch(() => {
+      setTokenDecimals(7)
+      setTokenMetadata(null)
+      setDecimalsLoading(false)
+    })
+  }, [tokenAddress])
+
   // Derived validation
   const amountNum       = parseFloat(amount)
   const penaltyBpsNum   = parseInt(penaltyBps, 10)
-  const unlockTimestamp = unlockDate ? Math.floor(new Date(unlockDate).getTime() / 1000) : 0
+  const unlockTimestamp = unlockDate ? dateTimeLocalToUnixSeconds(unlockDate) : 0
   const nowSecs         = Math.floor(Date.now() / 1000)
   const lockDuration    = unlockTimestamp - nowSecs
 
-  // Price data (only XLM for now)
-  const isXlm = tokenAddress === CONFIG.NATIVE_TOKEN
-  const priceData = isXlm ? getPrice('native') : null
-  const priceUsd = priceData?.usd
-  const priceUpdateStr = priceData ? formatPriceUpdate(priceData.lastUpdated) : null
+  // Convert amount to base units using the token's decimal precision
+  const amountInBaseUnits = amount ? amountToBaseUnits(amount, tokenDecimals) : 0n
 
   const errors = {
     amount:    !amount ? '' : isNaN(amountNum) || amountNum <= 0 ? 'Amount must be > 0' :
-               xlmToStroops(amount) > contractInfo.maxDeposit ? `Max: ${stroopsToXlm(contractInfo.maxDeposit)} XLM` : '',
+               amountInBaseUnits > contractInfo.maxDeposit ? `Max: ${baseUnitsToAmount(contractInfo.maxDeposit, tokenDecimals)} tokens` : '',
     unlock:    !unlockDate ? '' : unlockTimestamp <= nowSecs ? 'Must be in the future' :
-               lockDuration < CONFIG.MIN_LOCK_DURATION_SECS ? `Minimum lock: ${CONFIG.MIN_LOCK_DURATION_SECS}s` :
-               lockDuration > contractInfo.maxLockSecs ? `Max lock: ${contractInfo.maxLockSecs}s` : '',
+               lockDuration < CONFIG.MIN_LOCK_DURATION_SECS ? `Minimum lock: ${formatDuration(CONFIG.MIN_LOCK_DURATION_SECS)}` :
+               lockDuration > contractInfo.maxLockSecs ? `Max lock: ${formatDuration(contractInfo.maxLockSecs)}` : '',
     penalty:   isNaN(penaltyBpsNum) || penaltyBpsNum < 0 || penaltyBpsNum > 10_000 ? '0–10000 only' : '',
   }
-  const isValid = amount && unlockDate && !errors.amount && !errors.unlock && !errors.penalty && !contractInfo.paused
+  const isValid = amount && unlockDate && !errors.amount && !errors.unlock && !errors.penalty && !contractInfo.paused && !decimalsLoading
+
+  // Estimate gas when inputs change
+  useEffect(() => {
+    if (!wallet || !isValid) {
+      setGasEstimate(null)
+      return
+    }
+
+    const estimateAsync = async () => {
+      setIsEstimating(true)
+      try {
+        const amountStroops = xlmToStroops(amount)
+        const args = [
+          new Address(wallet.address).toScVal(),
+          new Address(tokenAddress).toScVal(),
+          nativeToScVal(amountStroops, { type: 'i128' }),
+          nativeToScVal(unlockTimestamp, { type: 'u64' }),
+          nativeToScVal(penaltyBpsNum, { type: 'u32' }),
+        ]
+        const result = await estimateGas(wallet.address, 'deposit', args)
+        setGasEstimate(result)
+      } catch (e) {
+        console.error('Gas estimation failed:', e)
+        setGasEstimate({ success: false })
+      } finally {
+        setIsEstimating(false)
+      }
+    }
+
+    // Debounce estimation
+    const timer = setTimeout(() => void estimateAsync(), 500)
+    return () => clearTimeout(timer)
+  }, [wallet, amount, tokenAddress, unlockTimestamp, penaltyBpsNum, isValid, estimateGas])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -58,41 +146,84 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
     setTxError(undefined)
     setTxHash(undefined)
 
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'deposit',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: {
+        token: tokenAddress,
+        amount: amount,
+        unlockTime: unlockTimestamp,
+        penaltyBps: penaltyBpsNum,
+      },
+    })
+
     try {
-      const amountStroops = xlmToStroops(amount)
-      const xdr = await buildDeposit(wallet.address, tokenAddress, amountStroops, unlockTimestamp, penaltyBpsNum)
+      const amountBaseUnits = amountToBaseUnits(amount, tokenDecimals)
+      const xdr = await buildDeposit(wallet.address, tokenAddress, amountBaseUnits, unlockTimestamp, penaltyBpsNum)
       if (!xdr) throw new Error('Failed to build transaction')
 
-      const signed = await signTransaction(xdr)
-      if (!signed) { setTxStatus('idle'); return }
-
-      setTxStatus('submitting')
-      const result = await submitTx(signed)
-
-      if (result.success) {
-        setTxStatus('success')
-        setTxHash(result.txHash)
-        toast.success('Deposit successful! Your tokens are locked.')
-        setAmount('')
-        setUnlockDate('')
-        setPenaltyBps('0')
-        setTimeout(onSuccess, 1500)
+      const sigResult = await signTransaction(xdr)
+      
+      // Handle the three signing outcomes
+      if (sigResult.signed) {
+        // Success: proceed with submission
+        setTxStatus('submitting')
+        const result = await submitTx(sigResult.xdr)
+        
+        if (result.success) {
+          setTxStatus('success')
+          setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
+          toast.success('Deposit successful! Your tokens are locked.')
+          setAmount('')
+          setUnlockDate('')
+          setPenaltyBps('0')
+          setTimeout(onSuccess, 1500)
+        } else {
+          setTxStatus('error')
+          setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
+          toast.error(result.error ?? 'Deposit failed')
+        }
+      } else if (sigResult.rejected) {
+        // User rejected: silently reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
+        return
       } else {
-        setTxStatus('error')
-        setTxError(result.error)
-        toast.error(result.error ?? 'Deposit failed')
+        // Signing error: already toasted, but still reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unexpected error'
       setTxStatus('error')
       setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
       toast.error(msg)
     }
   }
 
   const isPending = txStatus === 'signing' || txStatus === 'submitting' || txStatus === 'confirming'
 
-  if (!wallet) {
+  if (!wallet && !isRestoringSession) {
     return (
       <div className="card p-10 text-center">
         <p className="text-slate-400">Connect your wallet to deposit tokens.</p>
@@ -102,121 +233,197 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
 
   return (
     <div className="max-w-lg">
-      <div className="card p-6">
-        <h2 className="font-semibold text-lg mb-1">Lock tokens in a vault</h2>
-        <p className="text-sm text-slate-400 mb-6">
-          Tokens will be transferred to the contract and locked until your chosen date.
-        </p>
+      {/* Tab Navigation */}
+      <div className="mb-6 flex gap-2">
+        <button
+          onClick={() => setDepositTab('timestamp')}
+          className={[
+            'flex-1 px-4 py-2 rounded-lg font-medium transition-all text-sm',
+            depositTab === 'timestamp'
+              ? 'bg-stellar-600 text-white shadow-sm'
+              : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-700/60 hover:border-slate-600',
+          ].join(' ')}
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 inline mr-2">
+            <path d="M5.5 13a3.5 3.5 0 01-.369-6.98 4 4 0 117.753-1 4.5 4.5 0 11-4.384 5.98z" />
+          </svg>
+          By Timestamp
+        </button>
+        <button
+          onClick={() => setDepositTab('ledger')}
+          className={[
+            'flex-1 px-4 py-2 rounded-lg font-medium transition-all text-sm',
+            depositTab === 'ledger'
+              ? 'bg-stellar-600 text-white shadow-sm'
+              : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-700/60 hover:border-slate-600',
+          ].join(' ')}
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 inline mr-2">
+            <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+          </svg>
+          By Ledger
+        </button>
+      </div>
 
-        {contractInfo.paused && (
-          <div className="mb-5 p-3 rounded-xl bg-red-900/30 border border-red-700/40 text-red-400 text-sm">
-            ⚠️ Contract is currently paused. Deposits are disabled.
-          </div>
-        )}
+      {/* Timestamp-based Deposit Form */}
+      {depositTab === 'timestamp' && (
+        <div className="card p-6">
+          <h2 className="font-semibold text-lg mb-1">Lock tokens in a vault</h2>
+          <p className="text-sm text-slate-400 mb-6">
+            Tokens will be transferred to the contract and locked until your chosen date.
+          </p>
 
-        <form onSubmit={handleSubmit} className="space-y-5" noValidate>
-          {/* Token */}
-          <div>
-            <label className="label">Token contract address</label>
-            <input
-              className="input"
-              type="text"
-              value={tokenAddress}
-              onChange={(e) => setTokenAddress(e.target.value.trim())}
-              placeholder="CDLZFC3…"
-              disabled={isPending}
-            />
-            <p className="text-xs text-slate-500 mt-1">Default: native XLM token</p>
-          </div>
-
-          {/* Amount */}
-          <div>
-            <label className="label">Amount (XLM)</label>
-            <div className="relative">
-              <input
-                className={`input pr-14 ${errors.amount ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
-                type="number"
-                min="0"
-                step="0.0000001"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                placeholder="0.0000000"
-                disabled={isPending}
-              />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm font-medium pointer-events-none">XLM</span>
-            </div>
-            {errors.amount && <p className="text-xs text-red-400 mt-1">{errors.amount}</p>}
-          </div>
-
-          {/* Unlock date */}
-          <div>
-            <label className="label">Unlock date & time</label>
-            <input
-              className={`input ${errors.unlock ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
-              type="datetime-local"
-              value={unlockDate}
-              onChange={(e) => setUnlockDate(e.target.value)}
-              min={new Date(Date.now() + 60_000).toISOString().slice(0, 16)}
-              disabled={isPending}
-            />
-            {errors.unlock && <p className="text-xs text-red-400 mt-1">{errors.unlock}</p>}
-          </div>
-
-          {/* Penalty BPS */}
-          <div>
-            <label className="label">
-              Early exit penalty (basis points)
-              <span className="ml-1 text-slate-500 normal-case">— 0 = no penalty, 10000 = 100%</span>
-            </label>
-            <div className="relative">
-              <input
-                className={`input pr-20 ${errors.penalty ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
-                type="number"
-                min="0"
-                max="10000"
-                step="1"
-                value={penaltyBps}
-                onChange={(e) => setPenaltyBps(e.target.value)}
-                disabled={isPending}
-              />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm pointer-events-none">
-                {isNaN(penaltyBpsNum) ? '—' : formatBps(penaltyBpsNum)}
-              </span>
-            </div>
-            {errors.penalty && <p className="text-xs text-red-400 mt-1">{errors.penalty}</p>}
-          </div>
-
-          {/* Summary */}
-          {amount && unlockDate && !errors.amount && !errors.unlock && (
-            <div className="bg-slate-800/60 rounded-xl p-4 text-sm space-y-1.5">
-              <p className="text-slate-400 text-xs uppercase tracking-wide font-medium mb-2">Summary</p>
-              <Row label="Locking" value={formatTokenWithUsd(xlmToStroops(amount), 'XLM', priceUsd)} />
-              {priceUpdateStr && (
-                <p className="text-xs text-slate-500">{priceUpdateStr}</p>
-              )}
-              <Row label="Until" value={new Date(unlockDate).toLocaleString()} />
-              {penaltyBpsNum > 0 && <Row label="Early exit penalty" value={formatBps(penaltyBpsNum)} accent="orange" />}
+          {contractInfo.paused && (
+            <div className="mb-5 p-3 rounded-xl bg-red-900/30 border border-red-700/40 text-red-400 text-sm">
+              ⚠️ Contract is currently paused. Deposits are disabled.
             </div>
           )}
 
-          <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
+          <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+            {/* Token */}
+            <div>
+              <label className="label">Token contract address</label>
+              <div className="relative">
+                <input
+                  className={`input ${
+                    tokenAddressError
+                      ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500'
+                      : tokenAddress && isValidContractAddress(tokenAddress) && !decimalsLoading
+                        ? 'border-green-500/50 focus:ring-green-500/30 focus:border-green-500'
+                        : ''
+                  }`}
+                  type="text"
+                  value={tokenAddress}
+                  onChange={(e) => setTokenAddress(e.target.value.trim())}
+                  placeholder="CDLZFC3…"
+                  disabled={isPending}
+                />
+                {decimalsLoading && (
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs">
+                    Verifying…
+                  </span>
+                )}
+                {!decimalsLoading && tokenAddress && isValidContractAddress(tokenAddress) && !tokenAddressError && (
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-green-400 text-xs">
+                    ✓
+                  </span>
+                )}
+              </div>
+              {tokenAddressError ? (
+                <p className="text-xs text-red-400 mt-1">{tokenAddressError}</p>
+              ) : (
+                <p className="text-xs text-slate-500 mt-1">
+                  {tokenAddress === CONFIG.NATIVE_TOKEN
+                    ? 'Native XLM token (7 decimals)'
+                    : tokenMetadata
+                      ? `${tokenMetadata.symbol} - ${tokenMetadata.name} (${tokenDecimals} decimals)`
+                      : `Custom token (${tokenDecimals} decimals${decimalsLoading ? ', verifying…' : ''})`}
+                </p>
+              )}
+            </div>
 
-          <button
-            type="submit"
-            className="btn-primary w-full"
-            disabled={!isValid || isPending}
-          >
-            {isPending ? (
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : (
-              <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-              </svg>
+            {/* Amount */}
+            <div>
+              <label className="label">Amount</label>
+              <div className="relative">
+                <input
+                  className={`input pr-14 ${errors.amount ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
+                  type="number"
+                  min="0"
+                  step={`0.${'0'.repeat(Math.max(0, tokenDecimals - 1))}1`}
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="0"
+                  disabled={isPending || decimalsLoading}
+                />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm font-medium pointer-events-none">
+                  {tokenAddress === CONFIG.NATIVE_TOKEN ? 'XLM' : 'tokens'}
+                </span>
+              </div>
+              {errors.amount && <p className="text-xs text-red-400 mt-1">{errors.amount}</p>}
+            </div>
+
+            {/* Unlock date */}
+            <div>
+              <label className="label">
+                Unlock date & time
+                <span className="ml-1 text-slate-500 normal-case">— {getTimezoneOffsetString()}</span>
+              </label>
+              <input
+                className={`input ${errors.unlock ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
+                type="datetime-local"
+                value={unlockDate}
+                onChange={(e) => setUnlockDate(e.target.value)}
+                min={getMinDateTimeLocal()}
+                disabled={isPending}
+              />
+              {errors.unlock && <p className="text-xs text-red-400 mt-1">{errors.unlock}</p>}
+            </div>
+
+            {/* Penalty BPS */}
+            <div>
+              <label className="label">
+                Early exit penalty (basis points)
+                <span className="ml-1 text-slate-500 normal-case">— 0 = no penalty, 10000 = 100%</span>
+              </label>
+              <div className="relative">
+                <input
+                  className={`input pr-20 ${errors.penalty ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
+                  type="number"
+                  min="0"
+                  max="10000"
+                  step="1"
+                  value={penaltyBps}
+                  onChange={(e) => setPenaltyBps(e.target.value)}
+                  disabled={isPending}
+                />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm pointer-events-none">
+                  {isNaN(penaltyBpsNum) ? '—' : formatBps(penaltyBpsNum)}
+                </span>
+              </div>
+              {errors.penalty && <p className="text-xs text-red-400 mt-1">{errors.penalty}</p>}
+            </div>
+
+            {/* Summary */}
+            {amount && unlockDate && !errors.amount && !errors.unlock && (
+              <div className="bg-slate-800/60 rounded-xl p-4 text-sm space-y-1.5">
+                <p className="text-slate-400 text-xs uppercase tracking-wide font-medium mb-2">Summary</p>
+                <Row label="Locking" value={`${amount} XLM`} />
+                {(() => {
+                  const ts = formatUnlockTimestampWithTimezone(unlockTimestamp)
+                  return (
+                    <>
+                      <Row label="Unlock (local)" value={ts.local} />
+                      <Row label="Unlock (UTC)" value={ts.utc} />
+                    </>
+                  )
+                })()}
+                {penaltyBpsNum > 0 && <Row label="Early exit penalty" value={formatBps(penaltyBpsNum)} accent="orange" />}
+              </div>
             )}
-            {isPending ? 'Processing…' : 'Lock Tokens'}
-          </button>
-        </form>
-      </div>
+
+            <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
+
+            <button
+              type="submit"
+              className="btn-primary w-full"
+              disabled={!isValid || isPending}
+            >
+              {isPending ? (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                  <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                </svg>
+              )}
+              {isPending ? 'Processing…' : 'Lock Tokens'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Ledger-based Deposit Form */}
+      {depositTab === 'ledger' && <LockByLedgerForm contractInfo={contractInfo} onSuccess={onSuccess} />}
     </div>
   )
 }

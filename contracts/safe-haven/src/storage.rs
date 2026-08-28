@@ -1,14 +1,31 @@
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{token, Address, Env, Vec};
 
-use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
+use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 
-// Number of seconds per ledger — Soroban ledgers are ~5 seconds apart.
+// ================================================================
+// LEDGER_SECONDS: Average time between Stellar ledger closes
+// ================================================================
+// Stellar's consensus protocol produces a new ledger approximately every 5 seconds.
+// This constant is used to estimate wall-clock time remaining for ledger-based deposits
+// via the formula: estimated_seconds = remaining_ledgers × LEDGER_SECONDS
+//
+// Important: This is an APPROXIMATION, not a guarantee.
+// - Actual ledger close times vary by ±1-2 seconds due to network conditions
+// - The 5-second value is a Stellar network consensus target, not a hard limit
+// - Use this for UI display and rough estimates only, not for precise scheduling
+// - For exact time limits, prefer timestamp-based deposits instead
+//
+// Used by:
+// - contract.rs::time_remaining() — converts ledger count to estimated seconds for ledger-based deposits
+// - constants.rs::MIN_LOCK_LEDGERS — computes minimum lock duration in ledgers (60 seconds ÷ 5)
+// - storage.rs::BUMP_TARGET — ensures TTL coverage extends past maximum lock duration
 pub const LEDGER_SECONDS: u64 = 5;
 
 // How many ledgers to extend TTL to cover the maximum allowed lock duration.
 // BUMP_THRESHOLD is derived from BUMP_TARGET so both stay in sync automatically
 // when MAX_LOCK_DURATION_SECS changes — no silent inconsistency.
-pub const BUMP_TARGET: u32 = ((MAX_LOCK_DURATION_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+pub const BUMP_TARGET: u32 =
+    ((MAX_LOCK_DURATION_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
 pub const BUMP_THRESHOLD: u32 = BUMP_TARGET / 2;
 
 // ----------------------------------------------------------------
@@ -29,7 +46,7 @@ pub const BUMP_THRESHOLD: u32 = BUMP_TARGET / 2;
 pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
     let key = VaultKey::DepositCounter(depositor.clone());
     let id: u32 = env.storage().persistent().get(&key).unwrap_or(0);
-    env.storage().persistent().set(&key, &(id + 1));
+    env.storage().persistent().set(&key, &(id.saturating_add(1)));
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
@@ -37,13 +54,7 @@ pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
 }
 
 // ----------------------------------------------------------------
-//  Active deposit ID list helpers (fixes #18 and #20)
-//
-//  A `Vec<u32>` stored under `ActiveDepositIds(depositor)` is the
-//  authoritative list of IDs that currently have either a timestamp-
-//  based or a ledger-based deposit entry. Maintained in O(1) on push
-//  and O(n-active) on removal (n-active is bounded by actual open
-//  deposits, not historical counter value).
+//  Active deposit ID list helpers
 // ----------------------------------------------------------------
 
 fn get_active_ids(env: &Env, depositor: &Address) -> Vec<u32> {
@@ -85,13 +96,25 @@ pub fn remove_active_deposit_id(env: &Env, depositor: &Address, deposit_id: u32)
 
 /// O(1) single storage read — returns all active deposit IDs for
 /// `depositor`, regardless of whether they are timestamp- or
-/// ledger-based (fixes #18 and #20).
+/// ledger-based.
 pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     get_active_ids(env, depositor)
 }
 
+pub fn get_voting_power(env: &Env, voter: &Address) -> i128 {
+    let mut total = 0i128;
+    for deposit_id in get_active_ids(env, voter).iter() {
+        if let Some(entry) = get_deposit_readonly(env, voter, deposit_id) {
+            total = total.saturating_add(entry.amount);
+        } else if let Some(entry) = get_deposit_by_ledger_readonly(env, voter, deposit_id) {
+            total = total.saturating_add(entry.amount);
+        }
+    }
+    total
+}
+
 // ----------------------------------------------------------------
-//  Deposit helpers
+//  Deposit helpers (single-token, timestamp-based)
 // ----------------------------------------------------------------
 
 pub fn set_deposit(env: &Env, depositor: &Address, deposit_id: u32, entry: &VaultEntry) {
@@ -129,7 +152,12 @@ pub fn remove_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
 //  Ledger-based deposit helpers
 // ----------------------------------------------------------------
 
-pub fn set_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32, entry: &LedgerVaultEntry) {
+pub fn set_deposit_by_ledger(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    entry: &LedgerVaultEntry,
+) {
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().set(&key, entry);
     env.storage()
@@ -138,7 +166,11 @@ pub fn set_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32, en
     add_active_deposit_id(env, depositor, deposit_id);
 }
 
-pub fn get_deposit_by_ledger_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> Option<LedgerVaultEntry> {
+pub fn get_deposit_by_ledger_readonly(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<LedgerVaultEntry> {
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().get(&key)
 }
@@ -147,6 +179,95 @@ pub fn remove_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32)
     let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
     remove_active_deposit_id(env, depositor, deposit_id);
+}
+
+// ----------------------------------------------------------------
+//  Multi-token deposit helpers (issue #330)
+// ----------------------------------------------------------------
+
+/// Write a `MultiTokenVaultEntry` to persistent storage.
+pub fn set_multi_deposit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    entry: &MultiTokenVaultEntry,
+) {
+    let key = VaultKey::MultiDeposit(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, entry);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    add_active_deposit_id(env, depositor, deposit_id);
+}
+
+/// Read a `MultiTokenVaultEntry` (mutable path — extends TTL).
+pub fn get_multi_deposit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<MultiTokenVaultEntry> {
+    let key = VaultKey::MultiDeposit(depositor.clone(), deposit_id);
+    let entry: Option<MultiTokenVaultEntry> = env.storage().persistent().get(&key);
+    if entry.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    }
+    entry
+}
+
+/// Read a `MultiTokenVaultEntry` (read-only — does not extend TTL).
+pub fn get_multi_deposit_readonly(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<MultiTokenVaultEntry> {
+    let key = VaultKey::MultiDeposit(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Remove a `MultiTokenVaultEntry` from storage.
+pub fn remove_multi_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::MultiDeposit(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
+    remove_active_deposit_id(env, depositor, deposit_id);
+}
+
+// ----------------------------------------------------------------
+//  Withdrawal whitelist helpers (issue #331)
+// ----------------------------------------------------------------
+
+/// Persist a whitelist for a specific deposit. An empty Vec means "no restriction".
+pub fn set_withdrawal_whitelist(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    whitelist: &Vec<Address>,
+) {
+    let key = VaultKey::WithdrawalWhitelist(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, whitelist);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Read the whitelist for a deposit. Returns `None` if no whitelist has been configured.
+pub fn get_withdrawal_whitelist(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<Vec<Address>> {
+    let key = VaultKey::WithdrawalWhitelist(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Remove the whitelist when a deposit is withdrawn / cancelled.
+pub fn remove_withdrawal_whitelist(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::WithdrawalWhitelist(depositor.clone(), deposit_id);
+    // Only remove if present (avoid a panic on missing key).
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 // ----------------------------------------------------------------
@@ -254,14 +375,14 @@ pub fn get_fee_recipient(env: &Env) -> Option<Address> {
 //  Depositor list helpers
 // ----------------------------------------------------------------
 
-fn get_depositor_list(env: &Env) -> Vec<Address> {
+fn get_depositor_list(env: &Env) -> soroban_sdk::Vec<Address> {
     env.storage()
         .persistent()
         .get(&VaultKey::DepositorList)
-        .unwrap_or_else(|| Vec::new(env))
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
 }
 
-fn save_depositor_list(env: &Env, list: &Vec<Address>) {
+fn save_depositor_list(env: &Env, list: &soroban_sdk::Vec<Address>) {
     env.storage()
         .persistent()
         .set(&VaultKey::DepositorList, list);
@@ -271,13 +392,9 @@ fn save_depositor_list(env: &Env, list: &Vec<Address>) {
 }
 
 pub fn add_depositor(env: &Env, depositor: &Address) {
-    // DepositorFlag tracks *current* active status (set here, cleared by remove_depositor).
-    // DepositorInList tracks *ever appended to list* (set-once, never cleared) so that
-    // re-deposits after a withdrawal don't create duplicate list entries.
     let flag_key = VaultKey::DepositorFlag(depositor.clone());
     let in_list_key = VaultKey::DepositorInList(depositor.clone());
 
-    // If already active, nothing to do at all.
     if env
         .storage()
         .persistent()
@@ -287,13 +404,11 @@ pub fn add_depositor(env: &Env, depositor: &Address) {
         return;
     }
 
-    // (Re-)mark as active.
     env.storage().persistent().set(&flag_key, &true);
     env.storage()
         .persistent()
         .extend_ttl(&flag_key, BUMP_THRESHOLD, BUMP_TARGET);
 
-    // Only append to the list the very first time this address is seen.
     if !env
         .storage()
         .persistent()
@@ -312,18 +427,11 @@ pub fn add_depositor(env: &Env, depositor: &Address) {
 }
 
 pub fn remove_depositor(env: &Env, depositor: &Address) {
-    // O(1): deleting the per-depositor flag is enough to logically remove the
-    // depositor.  The DepositorList is an append-only index used exclusively
-    // for page enumeration; stale addresses are skipped at read time when the
-    // flag is absent.  This avoids deserialising and re-serialising the entire
-    // list on every withdrawal that empties a depositor's last vault — which
-    // would exceed Soroban's per-transaction budget for large lists.
     let flag_key = VaultKey::DepositorFlag(depositor.clone());
     env.storage().persistent().remove(&flag_key);
 }
 
 pub fn get_depositor_count(env: &Env) -> u32 {
-    // Count only addresses that still have an active flag.
     let list = get_depositor_list(env);
     let mut count: u32 = 0;
     for addr in list.iter() {
@@ -358,15 +466,97 @@ pub fn is_paused(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
+// ----------------------------------------------------------------
+//  Token allowlist helpers
+// ----------------------------------------------------------------
+
+pub fn set_token_allowed(env: &Env, token: &Address, allowed: bool) {
+    let key = VaultKey::AllowedToken(token.clone());
+    if allowed {
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+pub fn is_token_allowed(env: &Env, token: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::AllowedToken(token.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_strict_token_allowlist(env: &Env, strict: bool) {
+    let key = VaultKey::StrictTokenAllowlist;
+    env.storage().persistent().set(&key, &strict);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn is_strict_token_allowlist(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::StrictTokenAllowlist)
+        .unwrap_or(false)
+}
+
+// ----------------------------------------------------------------
+//  Token vetting workflow helpers
+// ----------------------------------------------------------------
+
+pub fn set_token_vetting(env: &Env, token: &Address, vetting: &TokenVetting) {
+    let key = VaultKey::TokenVetting(token.clone());
+    env.storage().persistent().set(&key, vetting);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_token_vetting(env: &Env, token: &Address) -> Option<TokenVetting> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::TokenVetting(token.clone()))
+}
+
+pub fn next_proposal_id(env: &Env) -> u32 {
+    let id: u32 = env.storage().persistent().get(&VaultKey::ProposalCounter).unwrap_or(0);
+    env.storage().persistent().set(&VaultKey::ProposalCounter, &(id + 1));
+    env.storage().persistent().extend_ttl(&VaultKey::ProposalCounter, BUMP_THRESHOLD, BUMP_TARGET);
+    id
+}
+
+pub fn set_governance_proposal(env: &Env, id: u32, proposal: &GovernanceProposal) {
+    let key = VaultKey::GovernanceProposal(id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_governance_proposal(env: &Env, id: u32) -> Option<GovernanceProposal> {
+    env.storage().persistent().get(&VaultKey::GovernanceProposal(id))
+}
+
+pub fn has_governance_vote(env: &Env, id: u32, voter: &Address) -> bool {
+    env.storage().persistent().get::<VaultKey, bool>(&VaultKey::GovernanceVote(id, voter.clone())).unwrap_or(false)
+}
+
+pub fn set_governance_vote(env: &Env, id: u32, voter: &Address) {
+    let key = VaultKey::GovernanceVote(id, voter.clone());
+    env.storage().persistent().set(&key, &true);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
 /// Returns the raw append-only depositor list (may contain stale entries after
 /// O(1) removes).  Callers that need only *active* depositors should filter with
 /// `depositor_is_active`.
-pub fn get_all_depositors_raw(env: &Env) -> Vec<Address> {
+pub fn get_all_depositors_raw(env: &Env) -> soroban_sdk::Vec<Address> {
     get_depositor_list(env)
 }
 
-/// Returns `true` if `depositor` currently has an active existence flag,
-/// i.e. they have at least one open deposit and have not been O(1)-removed.
+/// Returns `true` if `depositor` currently has an active existence flag.
 pub fn depositor_is_active(env: &Env, depositor: &Address) -> bool {
     let flag_key = VaultKey::DepositorFlag(depositor.clone());
     env.storage()
@@ -375,11 +565,25 @@ pub fn depositor_is_active(env: &Env, depositor: &Address) -> bool {
         .unwrap_or(false)
 }
 
-pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
+pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> (soroban_sdk::Vec<Address>, u32) {
     let list = get_depositor_list(env);
-    let mut page: Vec<Address> = Vec::new(env);
+    let mut page: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(env);
     let mut active_seen: u32 = 0;
     let end_at = offset.saturating_add(limit);
+
+    let mut total_count: u32 = 0;
+    for addr in list.iter() {
+        let flag_key = VaultKey::DepositorFlag(addr.clone());
+        if env
+            .storage()
+            .persistent()
+            .get::<VaultKey, bool>(&flag_key)
+            .unwrap_or(false)
+        {
+            total_count = total_count.saturating_add(1);
+        }
+    }
+
     for addr in list.iter() {
         let flag_key = VaultKey::DepositorFlag(addr.clone());
         if !env
@@ -388,7 +592,7 @@ pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
             .get::<VaultKey, bool>(&flag_key)
             .unwrap_or(false)
         {
-            continue; // stale entry left by O(1) remove — skip
+            continue;
         }
         if active_seen >= offset && active_seen < end_at {
             page.push_back(addr.clone());
@@ -398,7 +602,7 @@ pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
             break;
         }
     }
-    page
+    (page, total_count)
 }
 
 // ----------------------------------------------------------------
@@ -414,11 +618,10 @@ pub fn require_admin(env: &Env, caller: &Address) -> Result<(), crate::errors::V
 }
 
 // ----------------------------------------------------------------
-//  Storage version helpers (Task 4)
+//  Storage version helpers
 // ----------------------------------------------------------------
 
 /// Write the current schema version into persistent storage.
-/// Called at the end of a successful `migrate()` invocation.
 pub fn set_storage_version(env: &Env, version: u32) {
     env.storage()
         .persistent()
@@ -431,7 +634,399 @@ pub fn set_storage_version(env: &Env, version: u32) {
 /// Read the schema version that was last written by `migrate()`.
 /// Returns `None` for contracts deployed before versioning was introduced.
 pub fn get_storage_version(env: &Env) -> Option<u32> {
+    env.storage().persistent().get(&VaultKey::StorageVersion)
+}
+
+// ----------------------------------------------------------------
+//  Withdrawal limit per epoch helpers
+// ----------------------------------------------------------------
+
+/// Calculate the current epoch number based on the ledger sequence.
+/// Each epoch spans EPOCH_SIZE_LEDGERS ledgers.
+pub fn get_current_epoch(env: &Env) -> u32 {
+    let current_ledger = env.ledger().sequence();
+    current_ledger / EPOCH_SIZE_LEDGERS
+}
+
+/// Get the withdrawal count for a depositor in a given epoch.
+pub fn get_withdrawal_count(env: &Env, depositor: &Address, epoch: u32) -> u32 {
+    let key = VaultKey::WithdrawalCountPerEpoch(depositor.clone(), epoch);
     env.storage()
         .persistent()
-        .get(&VaultKey::StorageVersion)
+        .get::<VaultKey, u32>(&key)
+        .unwrap_or(0)
+}
+
+/// Increment the withdrawal count for a depositor in the current epoch.
+/// Returns the new count after incrementing.
+pub fn increment_withdrawal_count(env: &Env, depositor: &Address, epoch: u32) -> u32 {
+    let key = VaultKey::WithdrawalCountPerEpoch(depositor.clone(), epoch);
+    let current_count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let new_count = current_count.saturating_add(1);
+
+    env.storage().persistent().set(&key, &new_count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+
+    new_count
+}
+
+/// Check if a depositor has exceeded the withdrawal limit for the current epoch.
+/// Returns `Ok(())` if within limit, `Err(WithdrawalLimitExceeded)` if exceeded.
+pub fn check_withdrawal_limit(
+    env: &Env,
+    depositor: &Address,
+) -> Result<(), crate::errors::VaultError> {
+    let current_epoch = get_current_epoch(env);
+    let current_count = get_withdrawal_count(env, depositor, current_epoch);
+
+    if current_count >= WITHDRAWAL_LIMIT_PER_EPOCH {
+        Err(crate::errors::VaultError::WithdrawalLimitExceeded)
+    } else {
+        Ok(())
+    }
+}
+
+/// Clean up old epoch counters to prevent unbounded storage growth.
+/// Removes withdrawal counters for epochs older than `num_epochs_to_keep`.
+/// This is called after a withdrawal to remove the counter from the previous epoch.
+pub fn cleanup_old_epochs(env: &Env, depositor: &Address, current_epoch: u32) {
+    // Keep withdrawal counts for the current epoch and the previous epoch only.
+    // Earlier epochs are cleaned up to prevent unbounded storage growth.
+    if current_epoch > 1 {
+        let previous_epoch = current_epoch.saturating_sub(1);
+        // Remove counters from epochs before the previous one
+        let epoch_to_remove = previous_epoch.saturating_sub(1);
+        if epoch_to_remove > 0 {
+            for epoch in 0..epoch_to_remove {
+                let key = VaultKey::WithdrawalCountPerEpoch(depositor.clone(), epoch);
+                env.storage().persistent().remove(&key);
+            }
+        }
+    }
+}
+
+
+// ----------------------------------------------------------------
+//  Staker registry helpers
+// ----------------------------------------------------------------
+
+use crate::types::StakerEntry;
+
+/// Set a staker's stake amount. Creates or updates the entry.
+pub fn set_staker(env: &Env, staker: &Address, stake_amount: i128) {
+    let key = VaultKey::Staker(staker.clone());
+    env.storage().persistent().set(&key, &stake_amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get a staker's stake amount. Returns `None` if not registered.
+pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
+    let key = VaultKey::Staker(staker.clone());
+    env.storage().persistent().get(&key)
+}
+
+/// Get staker list (append-only, may contain stale entries after removes).
+fn get_staker_list(env: &Env) -> Vec<Address> {
+    let key = VaultKey::StakerList;
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Save the staker list.
+fn save_staker_list(env: &Env, stakers: &Vec<Address>) {
+    let key = VaultKey::StakerList;
+    env.storage().persistent().set(&key, stakers);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Add a staker to the staker list (O(1) if not already in list).
+pub fn add_staker_to_list(env: &Env, staker: &Address) {
+    // Check if already in list using StakerInList flag
+    let in_list_key = VaultKey::StakerInList(staker.clone());
+    if env
+        .storage()
+        .persistent()
+        .get::<VaultKey, bool>(&in_list_key)
+        .unwrap_or(false)
+    {
+        return; // Already in list, skip
+    }
+
+    // Add to list
+    let mut list = get_staker_list(env);
+    list.push_back(staker.clone());
+    save_staker_list(env, &list);
+
+    // Mark as in list
+    env.storage().persistent().set(&in_list_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&in_list_key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the total amount staked by all stakers.
+pub fn get_total_staked(env: &Env) -> i128 {
+    let key = VaultKey::TotalStaked;
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Update the total staked amount.
+pub fn set_total_staked(env: &Env, total: i128) {
+    let key = VaultKey::TotalStaked;
+    env.storage().persistent().set(&key, &total);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the rewards pool (accumulated penalties for stakers).
+pub fn get_rewards_pool(env: &Env) -> i128 {
+    let key = VaultKey::RewardsPool;
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Update the rewards pool.
+pub fn set_rewards_pool(env: &Env, amount: i128) {
+    let key = VaultKey::RewardsPool;
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the rewards claimed by a staker (cumulative).
+pub fn get_staker_rewards_claimed(env: &Env, staker: &Address) -> i128 {
+    let key = VaultKey::StakerRewardsClaimed(staker.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Update the rewards claimed by a staker.
+pub fn set_staker_rewards_claimed(env: &Env, staker: &Address, amount: i128) {
+    let key = VaultKey::StakerRewardsClaimed(staker.clone());
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Get the staker list (may contain stale entries). Active check via `get_staker`.
+pub fn get_stakers_list(env: &Env) -> Vec<Address> {
+    get_staker_list(env)
+}
+
+// ----------------------------------------------------------------
+//  Archived deposit helpers
+// ----------------------------------------------------------------
+
+/// Archive a timestamp-based deposit by moving it to archived storage
+/// and recording the archive timestamp.
+pub fn set_archived_deposit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    entry: &VaultEntry,
+    archive_timestamp: u64,
+) {
+    let key = VaultKey::ArchivedDeposit(depositor.clone(), deposit_id);
+    let archived = ArchivedVaultEntry {
+        token: entry.token.clone(),
+        amount: entry.amount,
+        unlock_time: entry.unlock_time,
+        depositor: depositor.clone(),
+        penalty_bps: entry.penalty_bps,
+        archive_timestamp,
+    };
+    env.storage().persistent().set(&key, &archived);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Retrieve an archived timestamp-based deposit without bumping TTL.
+pub fn get_archived_deposit_readonly(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<ArchivedVaultEntry> {
+    let key = VaultKey::ArchivedDeposit(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Delete an archived timestamp-based deposit from storage.
+pub fn remove_archived_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::ArchivedDeposit(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
+}
+
+/// Archive a ledger-based deposit by moving it to archived storage
+/// and recording the archive timestamp.
+pub fn set_archived_deposit_by_ledger(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    entry: &LedgerVaultEntry,
+    archive_timestamp: u64,
+) {
+    let key = VaultKey::ArchivedDepositByLedger(depositor.clone(), deposit_id);
+    let archived = ArchivedLedgerVaultEntry {
+        token: entry.token.clone(),
+        amount: entry.amount,
+        unlock_ledger: entry.unlock_ledger,
+        depositor: depositor.clone(),
+        penalty_bps: entry.penalty_bps,
+        archive_timestamp,
+    };
+    env.storage().persistent().set(&key, &archived);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Retrieve an archived ledger-based deposit without bumping TTL.
+pub fn get_archived_deposit_by_ledger_readonly(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+) -> Option<ArchivedLedgerVaultEntry> {
+    let key = VaultKey::ArchivedDepositByLedger(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Delete an archived ledger-based deposit from storage.
+pub fn remove_archived_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::ArchivedDepositByLedger(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
+}
+
+
+// ----------------------------------------------------------------
+//  Emergency withdrawal per-ledger tracking helpers
+// ----------------------------------------------------------------
+
+/// Add `amount` to the cumulative emergency withdrawal total for the current ledger.
+/// Returns the new total after adding.
+pub fn add_emergency_withdrawal(env: &Env, amount: i128) -> i128 {
+    let ledger = env.ledger().sequence();
+    let key = crate::types::VaultKey::EmergencyWithdrawalPerLedger(ledger);
+    let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    let new_total = current.saturating_add(amount);
+    env.storage().persistent().set(&key, &new_total);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    new_total
+}
+
+/// Get the cumulative emergency withdrawal amount for a specific ledger.
+/// Returns 0 if no withdrawals have been made in that ledger.
+pub fn get_emergency_withdrawal_per_ledger(env: &Env, ledger: u32) -> i128 {
+    let key = crate::types::VaultKey::EmergencyWithdrawalPerLedger(ledger);
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+/// Get the cumulative emergency withdrawal amount for the current ledger.
+pub fn get_current_ledger_emergency_withdrawal(env: &Env) -> i128 {
+    get_emergency_withdrawal_per_ledger(env, env.ledger().sequence())
+}
+
+// ----------------------------------------------------------------
+//  Upgrade helpers
+// ----------------------------------------------------------------
+
+/// Sets the current contract version string
+pub fn set_contract_version(env: &Env, version: &str) {
+    env.storage()
+        .persistent()
+        .set(&VaultKey::ContractVersion, version);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::ContractVersion, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Retrieves the current contract version string
+pub fn get_contract_version(env: &Env) -> Option<String> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::ContractVersion)
+}
+
+/// Stores the previous contract version for rollback support
+pub fn set_previous_contract_version(env: &Env, version: &str) {
+    env.storage()
+        .persistent()
+        .set(&VaultKey::PreviousContractVersion, version);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::PreviousContractVersion, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Retrieves the previous contract version for rollback support
+pub fn get_previous_contract_version(env: &Env) -> Option<String> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::PreviousContractVersion)
+}
+
+/// Sets a pending upgrade proposal
+pub fn set_upgrade(env: &Env, upgrade: &crate::types::UpgradeEntry) {
+    env.storage()
+        .persistent()
+        .set(&VaultKey::PendingUpgrade, upgrade);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::PendingUpgrade, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Retrieves the current pending upgrade proposal
+pub fn get_upgrade(env: &Env) -> Option<crate::types::UpgradeEntry> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::PendingUpgrade)
+}
+
+/// Removes the pending upgrade proposal from storage
+pub fn remove_upgrade(env: &Env) {
+    env.storage()
+        .persistent()
+        .remove(&VaultKey::PendingUpgrade);
+}
+
+pub fn set_faucet_asset(env: &Env, asset: &FaucetAsset, token: &Address, max_amount: i128) {
+    env.storage().persistent().set(&VaultKey::FaucetToken(asset.clone()), token);
+    env.storage().persistent().set(&VaultKey::FaucetMaxAmount(asset.clone()), &max_amount);
+    env.storage().persistent().extend_ttl(&VaultKey::FaucetToken(asset.clone()), BUMP_THRESHOLD, BUMP_TARGET);
+    env.storage().persistent().extend_ttl(&VaultKey::FaucetMaxAmount(asset.clone()), BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_faucet_status(env: &Env, asset: &FaucetAsset) -> FaucetStatus {
+    let token = env.storage().persistent().get(&VaultKey::FaucetToken(asset.clone()));
+    let max_amount = env.storage().persistent().get(&VaultKey::FaucetMaxAmount(asset.clone())).unwrap_or(0);
+    let request_count = env.storage().persistent().get(&VaultKey::FaucetRequestCount(asset.clone())).unwrap_or(0);
+    let distributed = env.storage().persistent().get(&VaultKey::FaucetDistributed(asset.clone())).unwrap_or(0);
+    let balance = token.as_ref().map(|address: &Address| token::Client::new(env, address).balance(&env.current_contract_address())).unwrap_or(0);
+    FaucetStatus { token, balance, max_amount, request_count, distributed }
+}
+
+pub fn get_faucet_last_request(env: &Env, account: &Address) -> Option<u64> {
+    env.storage().persistent().get(&VaultKey::FaucetLastRequest(account.clone()))
+}
+
+pub fn record_faucet_request(env: &Env, account: &Address, asset: &FaucetAsset, amount: i128, now: u64) {
+    let last_key = VaultKey::FaucetLastRequest(account.clone());
+    env.storage().persistent().set(&last_key, &now);
+    env.storage().persistent().extend_ttl(&last_key, BUMP_THRESHOLD, BUMP_TARGET);
+    let count_key = VaultKey::FaucetRequestCount(asset.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    env.storage().persistent().set(&count_key, &count.saturating_add(1));
+    let total_key = VaultKey::FaucetDistributed(asset.clone());
+    let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+    env.storage().persistent().set(&total_key, &total.saturating_add(amount));
 }

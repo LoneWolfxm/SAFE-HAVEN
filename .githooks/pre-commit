@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-commit hook: catch formatting and lint issues before they hit CI.
+# Activate with:  git config core.hooksPath .githooks
+
+set -euo pipefail
+
+echo "==> Running cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "==> Running cargo clippy --all-targets --features testutils -- -D warnings"
+cargo clippy --all-targets --features testutils -- -D warnings
+
+echo "==> All pre-commit checks passed"

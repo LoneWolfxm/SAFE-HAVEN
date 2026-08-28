@@ -16,7 +16,8 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
   const { getPrice } = usePrice()
 
   const isXlm   = deposit.token === CONFIG.NATIVE_TOKEN
-  const isUnlocked = deposit.timeRemaining === 0
+  const isUnlocked = deposit.timeRemaining !== null && deposit.timeRemaining === 0 && deposit.unlockVerified
+  const isPendingVerification = deposit.timeRemaining === 0 && !deposit.unlockVerified
   const hasPenalty = deposit.penaltyBps > 0
 
   const penaltyAmount = isUnlocked
@@ -56,6 +57,11 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
             <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
             Unlocked
           </span>
+        ) : isPendingVerification ? (
+          <span className="badge-yellow flex-shrink-0">
+            <span className="w-3 h-3 border-2 border-yellow-400/40 border-t-yellow-400 rounded-full animate-spin" />
+            Verifying…
+          </span>
         ) : (
           <span className="badge-yellow flex-shrink-0 countdown-active">
             <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
@@ -68,6 +74,8 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
       <div className="mt-3 text-sm text-slate-400">
         {isUnlocked ? (
           <span className="text-green-400">Ready to withdraw</span>
+        ) : isPendingVerification ? (
+          <span className="text-yellow-400/80">Confirming unlock on-chain…</span>
         ) : (
           <>Unlocks <span className="text-slate-200">{formatUnlockDate(deposit.unlockTime)}</span></>
         )}
@@ -125,9 +133,15 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
             )}
             Withdraw
           </button>
+        ) : isPendingVerification ? (
+          // Chain confirmation in-flight — disabled button keeps layout stable.
+          <button className="btn-primary flex-1" disabled>
+            <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            Verifying unlock…
+          </button>
         ) : (
           <button
-            className="btn-danger flex-1"
+            className={hasPenalty ? 'btn-danger flex-1' : 'btn-secondary flex-1'}
             onClick={() => onCancel(deposit.depositId)}
             disabled={txPending}
           >

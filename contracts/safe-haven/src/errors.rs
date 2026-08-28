@@ -18,4 +18,15 @@ pub enum VaultError {
     ContractPaused = 12,
     VaultAlreadyUnlocked = 13,
     MissingFeeRecipient = 14,
+    /// `initialize` was called on an already-initialized contract.
+    /// The `is_initialized` flag is the sole re-initialization guard (closes #46).
+    AlreadyInitialized = 15,
+    /// Too many tokens in a multi-token deposit — exceeds MAX_TOKENS_PER_DEPOSIT (issue #330).
+    TooManyTokens = 16,
+    /// A multi-token deposit must contain at least one token (issue #330).
+    EmptyTokenList = 17,
+    /// Recipient is not on the withdrawal whitelist (issue #331).
+    RecipientNotWhitelisted = 18,
+    /// Compound frequency must be >= 60 seconds if non-zero (issue #332).
+    InvalidCompoundFrequency = 19,
 }

@@ -1,4 +1,5 @@
 import { useWallet } from '../context/WalletContext'
+import { useContractLogs } from '../context/ContractLogsContext'
 import { useDeposits } from '../hooks/useDeposits'
 import type { ContractInfo } from '../App'
 import { DepositCard } from '../components/DepositCard'
@@ -14,8 +15,9 @@ interface DashboardProps {
 }
 
 export function Dashboard({ contractInfo }: DashboardProps) {
-  const { wallet, signTransaction } = useWallet()
-  const { deposits, loading, error, refresh } = useDeposits(wallet?.address ?? null)
+  const { wallet, isRestoringSession, signTransaction } = useWallet()
+  const { deposits, loading, error, refresh, pollRemoveDeposit } = useDeposits(wallet?.address ?? null)
+  const { addLog, updateLog } = useContractLogs()
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash,   setTxHash]   = useState<string | undefined>()
   const [txError,  setTxError]  = useState<string | undefined>()
@@ -28,30 +30,69 @@ export function Dashboard({ contractInfo }: DashboardProps) {
     setTxError(undefined)
     setTxHash(undefined)
 
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'withdraw',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: { depositId },
+    })
+
     try {
       const xdr = await buildWithdraw(wallet.address, depositId)
       if (!xdr) throw new Error('Failed to build transaction')
 
-      const signed = await signTransaction(xdr)
-      if (!signed) { setTxStatus('idle'); return }
+      const sigResult = await signTransaction(xdr)
+      
+      // Handle the three signing outcomes
+      if (sigResult.signed) {
+        // Success: proceed with submission
+        setTxStatus('submitting')
+        const result = await submitTx(sigResult.xdr)
 
-      setTxStatus('submitting')
-      const result = await submitTx(signed)
-
-      if (result.success) {
-        setTxStatus('success')
-        setTxHash(result.txHash)
-        toast.success('Withdrawal successful!')
-        setTimeout(refresh, 2000)
+        if (result.success) {
+          setTxStatus('success')
+          setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
+          toast.success('Withdrawal successful!')
+          // Poll for individual deposit removal instead of full refresh
+          await pollRemoveDeposit(depositId)
+        } else {
+          setTxStatus('error')
+          setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
+          toast.error(result.error ?? 'Withdrawal failed')
+        }
+      } else if (sigResult.rejected) {
+        // User rejected: silently reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
       } else {
-        setTxStatus('error')
-        setTxError(result.error)
-        toast.error(result.error ?? 'Withdrawal failed')
+        // Signing error: already toasted, but still reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
+      return
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unexpected error'
       setTxStatus('error')
       setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
       toast.error(msg)
     } finally {
       setPendingId(null)
@@ -65,37 +106,76 @@ export function Dashboard({ contractInfo }: DashboardProps) {
     setTxError(undefined)
     setTxHash(undefined)
 
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'cancel_deposit',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: { depositId },
+    })
+
     try {
       const xdr = await buildCancelDeposit(wallet.address, depositId)
       if (!xdr) throw new Error('Failed to build transaction')
 
-      const signed = await signTransaction(xdr)
-      if (!signed) { setTxStatus('idle'); return }
+      const sigResult = await signTransaction(xdr)
+      
+      // Handle the three signing outcomes
+      if (sigResult.signed) {
+        // Success: proceed with submission
+        setTxStatus('submitting')
+        const result = await submitTx(sigResult.xdr)
 
-      setTxStatus('submitting')
-      const result = await submitTx(signed)
-
-      if (result.success) {
-        setTxStatus('success')
-        setTxHash(result.txHash)
-        toast.success('Deposit cancelled.')
-        setTimeout(refresh, 2000)
+        if (result.success) {
+          setTxStatus('success')
+          setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
+          toast.success('Deposit cancelled.')
+          // Poll for individual deposit removal instead of full refresh
+          await pollRemoveDeposit(depositId)
+        } else {
+          setTxStatus('error')
+          setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
+          toast.error(result.error ?? 'Cancel failed')
+        }
+      } else if (sigResult.rejected) {
+        // User rejected: silently reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
       } else {
-        setTxStatus('error')
-        setTxError(result.error)
-        toast.error(result.error ?? 'Cancel failed')
+        // Signing error: already toasted, but still reset state
+        setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
+      return
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unexpected error'
       setTxStatus('error')
       setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
       toast.error(msg)
     } finally {
       setPendingId(null)
     }
   }
 
-  if (!wallet) {
+  if (!wallet && !isRestoringSession) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
         <div className="w-16 h-16 rounded-2xl bg-stellar-900/40 border border-stellar-700/40 flex items-center justify-center mb-4">
@@ -109,14 +189,59 @@ export function Dashboard({ contractInfo }: DashboardProps) {
     )
   }
 
+  // Show loading skeleton while restoring session
+  if (isRestoringSession) {
+    return (
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+        </div>
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-semibold text-lg">Your Vaults</h2>
+            <div className="w-16 h-9 bg-slate-700/40 rounded-lg animate-pulse" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {[1, 2].map((i) => (
+              <div key={i} className="card p-5 h-36 animate-pulse">
+                <div className="flex gap-3">
+                  <div className="w-10 h-10 rounded-full bg-slate-700/60" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 bg-slate-700/60 rounded w-1/2" />
+                    <div className="h-3 bg-slate-700/40 rounded w-1/3" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <StatCard label="Your Deposits" value={String(deposits.length)} />
-        <StatCard label="Unlocked" value={String(deposits.filter(d => d.timeRemaining === 0).length)} accent="green" />
-        <StatCard label="Locked" value={String(deposits.filter(d => d.timeRemaining > 0).length)} accent="yellow" />
-        <StatCard label="Total Depositors" value={contractInfo.depositorCount > 0 ? String(contractInfo.depositorCount) : '–'} />
+        {loading && deposits.length === 0 ? (
+          // Loading skeleton for stats
+          <>
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+          </>
+        ) : (
+          <>
+            <StatCard label="Your Deposits" value={String(deposits.length)} />
+            <StatCard label="Unlocked" value={String(deposits.filter(d => d.timeRemaining === 0 && d.unlockVerified).length)} accent="green" />
+            <StatCard label="Locked" value={String(deposits.filter(d => d.timeRemaining === null || d.timeRemaining > 0 || !d.unlockVerified).length)} accent="yellow" />
+            <StatCard label="Total Depositors" value={contractInfo.depositorCount > 0 ? String(contractInfo.depositorCount) : '–'} />
+          </>
+        )}
       </div>
 
       {/* Tx status */}
@@ -160,7 +285,7 @@ export function Dashboard({ contractInfo }: DashboardProps) {
         ) : deposits.length === 0 ? (
           <div className="card p-10 text-center">
             <p className="text-slate-400">No active vaults for</p>
-            <p className="font-mono text-xs text-stellar-400 mt-1">{shortAddr(wallet.address)}</p>
+            {wallet && <p className="font-mono text-xs text-stellar-400 mt-1">{shortAddr(wallet.address)}</p>}
             <p className="text-slate-500 text-sm mt-3">Use the Deposit tab to lock your first tokens.</p>
           </div>
         ) : (
@@ -191,6 +316,15 @@ function StatCard({ label, value, accent }: { label: string; value: string; acce
     <div className="card p-4">
       <p className="text-xs text-slate-500 uppercase tracking-wide">{label}</p>
       <p className={`text-2xl font-bold mt-1 ${valueClass}`}>{value}</p>
+    </div>
+  )
+}
+
+function StatCardSkeleton() {
+  return (
+    <div className="card p-4 animate-pulse">
+      <div className="h-3 bg-slate-700/60 rounded w-1/2" />
+      <div className="h-7 bg-slate-700/40 rounded w-2/3 mt-2" />
     </div>
   )
 }

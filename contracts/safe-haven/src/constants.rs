@@ -16,6 +16,9 @@ pub const MIN_LOCK_DURATION_SECS: u64 = 60;
 /// Minimum number of ledgers required for a ledger-based deposit.
 pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u32;
 
+pub const UPGRADE_TIMELOCK_SECS: u64 = 14 * 24 * 60 * 60;
+pub const MIN_UPGRADE_APPROVALS: u32 = 3;
+
 /// Maximum depositors per `batch_emergency_withdraw` call.
 ///
 /// Soroban's per-transaction instruction budget is ~100M instructions.
@@ -23,3 +26,9 @@ pub const MIN_LOCK_LEDGERS: u32 = (MIN_LOCK_DURATION_SECS / LEDGER_SECONDS) as u
 /// and one event publish — roughly 1–2M instructions each.
 /// 25 leaves comfortable headroom for the common migration use-case.
 pub const MAX_BATCH_SIZE: u32 = 25;
+
+/// Staker penalty split: percentage of penalties allocated to stakers (70% = 7000 basis points)
+pub const STAKER_PENALTY_BPS: u32 = 7_000;
+
+/// Fee recipient penalty split: percentage of penalties allocated to fee recipient (30% = 3000 basis points)
+pub const FEE_RECIPIENT_PENALTY_BPS: u32 = 3_000;
