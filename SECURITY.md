@@ -1,5 +1,7 @@
 # Security Policy
 
+For handling and documenting confirmed incidents, see [INCIDENT_RESPONSE.md](./INCIDENT_RESPONSE.md).
+
 ## Supported Versions
 
 | Version | Supported |
@@ -21,6 +23,8 @@ Please include:
 We will acknowledge receipt within 72 hours and aim to release a fix within 14 days for critical issues.
 
 ## Scope
+
+For operational response to contract vulnerabilities, state mismatches, and admin-key incidents, see the [Disaster Recovery Runbook](DISASTER_RECOVERY.md).
 
 The following are considered in-scope vulnerabilities:
 

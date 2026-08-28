@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
+import { useContractLogs } from '../context/ContractLogsContext'
 import { TxStatusBadge } from '../components/TxStatusBadge'
 import { LockByLedgerForm } from '../components/LockByLedgerForm'
 import { SubmitTimeoutBanner } from '../components/SubmitTimeoutBanner'
@@ -10,6 +11,7 @@ import { formatBps, formatDuration, dateTimeLocalToUnixSeconds, getMinDateTimeLo
 import type { TxStatus } from '../types'
 import type { ContractInfo } from '../App'
 import { CONFIG } from '../config'
+import { Address, nativeToScVal } from '@stellar/stellar-sdk'
 
 type DepositTab = 'timestamp' | 'ledger'
 
@@ -20,6 +22,7 @@ interface DepositPageProps {
 
 export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   const { wallet, isRestoringSession, signTransaction } = useWallet()
+  const { addLog, updateLog } = useContractLogs()
 
   // Deposit tab state
   const [depositTab, setDepositTab] = useState<DepositTab>('timestamp')
@@ -117,6 +120,39 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   }
   const isValid = amount && unlockDate && !errors.amount && !errors.unlock && !errors.penalty && !contractInfo.paused && !decimalsLoading
 
+  // Estimate gas when inputs change
+  useEffect(() => {
+    if (!wallet || !isValid) {
+      setGasEstimate(null)
+      return
+    }
+
+    const estimateAsync = async () => {
+      setIsEstimating(true)
+      try {
+        const amountStroops = xlmToStroops(amount)
+        const args = [
+          new Address(wallet.address).toScVal(),
+          new Address(tokenAddress).toScVal(),
+          nativeToScVal(amountStroops, { type: 'i128' }),
+          nativeToScVal(unlockTimestamp, { type: 'u64' }),
+          nativeToScVal(penaltyBpsNum, { type: 'u32' }),
+        ]
+        const result = await estimateGas(wallet.address, 'deposit', args)
+        setGasEstimate(result)
+      } catch (e) {
+        console.error('Gas estimation failed:', e)
+        setGasEstimate({ success: false })
+      } finally {
+        setIsEstimating(false)
+      }
+    }
+
+    // Debounce estimation
+    const timer = setTimeout(() => void estimateAsync(), 500)
+    return () => clearTimeout(timer)
+  }, [wallet, amount, tokenAddress, unlockTimestamp, penaltyBpsNum, isValid, estimateGas])
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!wallet || !isValid) return
@@ -129,6 +165,19 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
     // Start the 2-minute countdown. If it fires before we call
     // submitTimeout.cancel(), the race below will throw a TimeoutError.
     const timeoutRace = submitTimeout.start()
+
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'deposit',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: {
+        token: tokenAddress,
+        amount: amount,
+        unlockTime: unlockTimestamp,
+        penaltyBps: penaltyBpsNum,
+      },
+    })
 
     try {
       const amountBaseUnits = amountToBaseUnits(amount, tokenDecimals)
@@ -160,6 +209,10 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
         if (result.success) {
           setTxStatus('success')
           setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
           toast.success('Deposit successful! Your tokens are locked.')
           setAmount('')
           setUnlockDate('')
@@ -168,31 +221,39 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
         } else {
           setTxStatus('error')
           setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
           toast.error(result.error ?? 'Deposit failed')
         }
       } else if (sigResult.rejected) {
         // User rejected: silently reset state
         submitTimeout.cancel()
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
         return
       } else {
         // Signing error: already toasted, but still reset state
         submitTimeout.cancel()
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
     } catch (e) {
-      submitTimeout.cancel()
-      if (e instanceof TimeoutError) {
-        setTxStatus('error')
-        setTimedOut(true)
-        setTxError('Submission timed out. Please try again.')
-        toast.error('Deposit submission timed out. Your wallet wasn\'t charged — please try again.')
-      } else {
-        const msg = e instanceof Error ? e.message : 'Unexpected error'
-        setTxStatus('error')
-        setTxError(msg)
-        toast.error(msg)
-      }
+      const msg = e instanceof Error ? e.message : 'Unexpected error'
+      setTxStatus('error')
+      setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
+      toast.error(msg)
     }
   }
 

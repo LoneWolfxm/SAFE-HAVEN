@@ -139,6 +139,36 @@ pub fn unpaused(env: &Env, admin: &Address) {
     env.events().publish(topics, ());
 }
 
+pub fn token_proposed(env: &Env, token: &Address, proposer: &Address) {
+    let topics = (Symbol::new(env, "token_proposed"), token.clone());
+    env.events().publish(topics, proposer.clone());
+}
+
+pub fn token_reviewed(env: &Env, token: &Address, reviewer: &Address, passed: bool) {
+    let topics = (Symbol::new(env, "token_reviewed"), token.clone());
+    env.events().publish(topics, (reviewer.clone(), passed));
+}
+
+pub fn token_approved(env: &Env, token: &Address, approver: &Address) {
+    let topics = (Symbol::new(env, "token_approved"), token.clone());
+    env.events().publish(topics, approver.clone());
+}
+
+pub fn governance_proposed(env: &Env, proposal_id: u32, proposer: &Address) {
+    let topics = (Symbol::new(env, "gov_proposed"), proposal_id);
+    env.events().publish(topics, proposer.clone());
+}
+
+pub fn governance_voted(env: &Env, proposal_id: u32, voter: &Address, support: bool, weight: i128) {
+    let topics = (Symbol::new(env, "gov_voted"), proposal_id, voter.clone());
+    env.events().publish(topics, (support, weight));
+}
+
+pub fn governance_executed(env: &Env, proposal_id: u32) {
+    let topics = (Symbol::new(env, "gov_executed"), proposal_id);
+    env.events().publish(topics, ());
+}
+
 pub fn withdraw_to(
     env: &Env,
     depositor: &Address,

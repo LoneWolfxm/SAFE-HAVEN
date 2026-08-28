@@ -1,6 +1,14 @@
+import { useState } from 'react'
 import { useWallet } from '../context/WalletContext'
+import { useNetwork } from '../context/NetworkContext'
 import { shortAddr } from '../lib/format'
 import { CONFIG } from '../config'
+import { BuyTokensModal } from './BuyTokensModal'
+import { NetworkSwitcher } from './NetworkSwitcher'
+import { SecurityTipsModal } from './SecurityTipsModal'
+import { SmallBalanceWarning } from './SmallBalanceWarning'
+import { PublicWifiWarning } from './PublicWifiWarning'
+import { HelpModal } from './HelpModal'
 
 interface HeaderProps {
   isPaused: boolean
@@ -8,9 +16,25 @@ interface HeaderProps {
 
 export function Header({ isPaused }: HeaderProps) {
   const { wallet, isConnecting, isRestoringSession, networkMismatch, connect, disconnect } = useWallet()
+  const { isMismatched } = useNetwork()
+  const [showBuyModal, setShowBuyModal] = useState(false)
+  const [showSecurityTips, setShowSecurityTips] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
 
   return (
     <>
+      {/* Public WiFi Warning */}
+      <PublicWifiWarning enabled={!!wallet} />
+
+      {/* Small Balance Warning */}
+      {wallet && (
+        <SmallBalanceWarning
+          walletAddress={wallet.address}
+          threshold={10}
+          horizonUrl={CONFIG.HORIZON_URL}
+        />
+      )}
+
       {/* Network mismatch warning banner */}
       {networkMismatch && wallet?.walletNetwork && (
         <div className="w-full bg-red-900/30 border-b border-red-700/40 px-4 py-3">
@@ -54,6 +78,63 @@ export function Header({ isPaused }: HeaderProps) {
             </span>
           )}
 
+          {/* Network Switcher */}
+          <NetworkSwitcher />
+
+          {/* Buy Tokens button (only show if Ramp is enabled and wallet connected) */}
+          {CONFIG.RAMP_ENABLED && wallet && !networkMismatch && (
+            <button
+              onClick={() => setShowBuyModal(true)}
+              className="btn-secondary text-xs hidden sm:flex items-center gap-2"
+              title="Buy tokens with fiat currency"
+            >
+              <svg
+                viewBox="0 0 20 20"
+                fill="currentColor"
+                className="w-4 h-4"
+              >
+                <path d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" />
+              </svg>
+              Buy Tokens
+            </button>
+          )}
+
+          {/* Help button */}
+          <button
+            onClick={() => setShowHelp(true)}
+            className="btn-secondary text-xs hidden sm:flex items-center gap-2"
+            title="View help and FAQ"
+          >
+            <svg
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className="w-4 h-4"
+            >
+              <path
+                fillRule="evenodd"
+                d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Help
+          </button>
+
+          {/* Security Tips button */}
+          <button
+            onClick={() => setShowSecurityTips(true)}
+            className="btn-secondary text-xs hidden sm:flex items-center gap-2"
+            title="View security tips and best practices"
+          >
+            <svg
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className="w-4 h-4"
+            >
+              <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+            </svg>
+            Security
+          </button>
+
           {/* Wallet button / skeleton */}
           {isRestoringSession ? (
             // Show skeleton while validating the restored session
@@ -67,7 +148,7 @@ export function Header({ isPaused }: HeaderProps) {
           ) : wallet ? (
             <div className="flex items-center gap-2">
               <div className="hidden sm:block text-right">
-                <p className="text-xs text-slate-400">Connected</p>
+                <p className="text-xs text-slate-400">Active wallet</p>
                 <p className="text-sm font-mono text-slate-200">{shortAddr(wallet.address)}</p>
               </div>
               <div className="relative group">
@@ -111,7 +192,17 @@ export function Header({ isPaused }: HeaderProps) {
           )}
         </div>
       </div>
+      {feedbackOpen && <FeedbackModal onClose={() => setFeedbackOpen(false)} />}
     </header>
+
+    {/* Buy Tokens Modal */}
+    <BuyTokensModal isOpen={showBuyModal} onClose={() => setShowBuyModal(false)} />
+
+    {/* Help Modal */}
+    <HelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />
+
+    {/* Security Tips Modal */}
+    <SecurityTipsModal isOpen={showSecurityTips} onClose={() => setShowSecurityTips(false)} />
     </>
   )
 }
