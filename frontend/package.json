@@ -8,11 +8,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "playwright test",
     "test:watch": "vitest",
     "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "playwright test",
     "test:ui": "playwright test --ui"
   },
   "dependencies": {
@@ -25,6 +24,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.5.2",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "@typescript-eslint/eslint-plugin": "7.13.0",

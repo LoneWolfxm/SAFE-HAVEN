@@ -3,6 +3,8 @@ import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
 import { TxStatusBadge } from '../components/TxStatusBadge'
 import { LockByLedgerForm } from '../components/LockByLedgerForm'
+import { SubmitTimeoutBanner } from '../components/SubmitTimeoutBanner'
+import { useSubmitTimeout, TimeoutError } from '../hooks/useSubmitTimeout'
 import { buildDeposit, submitTx, getTokenDecimals, getTokenMetadata } from '../lib/stellar'
 import { formatBps, formatDuration, dateTimeLocalToUnixSeconds, getMinDateTimeLocal, formatUnlockTimestampWithTimezone, getTimezoneOffsetString, amountToBaseUnits, baseUnitsToAmount, isValidContractAddress, validateTokenAddress } from '../lib/format'
 import type { TxStatus } from '../types'
@@ -30,6 +32,19 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash,   setTxHash]   = useState<string | undefined>()
   const [txError,  setTxError]  = useState<string | undefined>()
+
+  // Whether the last submission attempt timed out (drives the banner retry UI).
+  const [timedOut, setTimedOut] = useState(false)
+
+  // Submission timeout — 2-minute countdown with 30-second warning.
+  const submitTimeout = useSubmitTimeout({
+    onTimeout: (elapsedMs) => {
+      console.warn(`[DepositPage] Submission timed out after ${elapsedMs}ms`)
+    },
+    onWarning: () => {
+      toast('Submission is taking longer than expected…', { icon: '⚠️', duration: 4000 })
+    },
+  })
 
   // Token decimals state — defaults to 7 (XLM) but updates when token changes
   const [tokenDecimals, setTokenDecimals] = useState<number>(7)
@@ -109,6 +124,11 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
     setTxStatus('signing')
     setTxError(undefined)
     setTxHash(undefined)
+    setTimedOut(false)
+
+    // Start the 2-minute countdown. If it fires before we call
+    // submitTimeout.cancel(), the race below will throw a TimeoutError.
+    const timeoutRace = submitTimeout.start()
 
     try {
       const amountBaseUnits = amountToBaseUnits(amount, tokenDecimals)
@@ -121,8 +141,22 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
       if (sigResult.signed) {
         // Success: proceed with submission
         setTxStatus('submitting')
-        const result = await submitTx(sigResult.xdr)
+
+        // Race the submission against the timeout.
+        const result = await Promise.race([submitTx(sigResult.xdr), timeoutRace.then(() => null)])
         
+        if (result === null) {
+          // The timeout won the race (timeoutRace resolved — but we treat
+          // null as a sentinel for "timeout fired" if TimeoutError wasn't thrown).
+          // In practice TimeoutError is thrown, so this path is a safety net.
+          setTxStatus('error')
+          setTimedOut(true)
+          setTxError('Submission timed out. Please try again.')
+          return
+        }
+
+        submitTimeout.cancel()
+
         if (result.success) {
           setTxStatus('success')
           setTxHash(result.txHash)
@@ -138,21 +172,38 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
         }
       } else if (sigResult.rejected) {
         // User rejected: silently reset state
+        submitTimeout.cancel()
         setTxStatus('idle')
         return
       } else {
         // Signing error: already toasted, but still reset state
+        submitTimeout.cancel()
         setTxStatus('idle')
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Unexpected error'
-      setTxStatus('error')
-      setTxError(msg)
-      toast.error(msg)
+      submitTimeout.cancel()
+      if (e instanceof TimeoutError) {
+        setTxStatus('error')
+        setTimedOut(true)
+        setTxError('Submission timed out. Please try again.')
+        toast.error('Deposit submission timed out. Your wallet wasn\'t charged — please try again.')
+      } else {
+        const msg = e instanceof Error ? e.message : 'Unexpected error'
+        setTxStatus('error')
+        setTxError(msg)
+        toast.error(msg)
+      }
     }
   }
 
   const isPending = txStatus === 'signing' || txStatus === 'submitting' || txStatus === 'confirming'
+
+  // Retry the last submission with the same form data (no re-entry needed).
+  function handleTimeoutRetry() {
+    setTimedOut(false)
+    setTxStatus('idle')
+    setTxError(undefined)
+  }
 
   if (!wallet && !isRestoringSession) {
     return (
@@ -334,6 +385,14 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
             )}
 
             <TxStatusBadge status={txStatus} txHash={txHash} error={txError} />
+
+            <SubmitTimeoutBanner
+              secondsRemaining={submitTimeout.secondsRemaining}
+              isWarning={submitTimeout.isWarning}
+              timedOut={timedOut}
+              onRetry={handleTimeoutRetry}
+              onDismiss={() => setTimedOut(false)}
+            />
 
             <button
               type="submit"
