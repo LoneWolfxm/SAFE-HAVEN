@@ -236,6 +236,11 @@ export function WithdrawPage() {
   const tokenLabel = tokenSymbol
     ?? (symbolLoading ? '…' : lookedUp ? `${lookedUp.token.slice(0, 6)}…` : '')
 
+  // Price data
+  const priceData = isXlm ? getPrice('native') : null
+  const priceUsd = priceData?.usd
+  const priceUpdateStr = priceData ? formatPriceUpdate(priceData.lastUpdated) : null
+
   return (
     <div className="max-w-lg space-y-5">
       {/* Lookup form */}

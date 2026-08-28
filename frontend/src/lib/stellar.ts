@@ -4,7 +4,6 @@
 
 import {
   Contract,
-  Networks,
   rpc as StellarRpc,
   TransactionBuilder,
   BASE_FEE,
@@ -12,7 +11,6 @@ import {
   Address,
   nativeToScVal,
   scValToNative,
-  type SorobanDataBuilder,
 } from '@stellar/stellar-sdk'
 import { CONFIG } from '../config'
 import type { FaucetAsset, FaucetStatus, VaultEntry, ContractResult } from '../types'
