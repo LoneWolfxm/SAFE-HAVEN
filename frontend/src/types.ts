@@ -11,6 +11,9 @@ export interface VaultEntry {
   penaltyBps: number  // 0–10_000 (basis points)
 }
 
+/** Available ways to plan a withdrawal */
+export type WithdrawalStrategy = 'lump-sum' | 'linear' | 'cliff'
+
 /** A deposit with its ID attached */
 export interface Deposit extends VaultEntry {
   depositId: number
@@ -39,7 +42,25 @@ export interface WalletInfo {
 }
 
 /** Tab pages */
-export type PageTab = 'dashboard' | 'deposit' | 'withdraw' | 'admin'
+export type PageTab = 'dashboard' | 'deposit' | 'withdraw' | 'settings' | 'admin'
+
+export type RecoveryContactType = 'email' | 'wallet'
+
+export interface RecoveryContact {
+  id: string
+  type: RecoveryContactType
+  value: string
+  addedAt: number
+}
+
+export interface RecoveryRequest {
+  recoveryContactId: string
+  newWallet: string
+  verificationCode: string
+  initiatedAt: number
+  unlockAt: number
+  verifiedAt: number | null
+}
 
 /** Loading states for async operations */
 export type TxStatus = 'idle' | 'signing' | 'submitting' | 'confirming' | 'success' | 'error'

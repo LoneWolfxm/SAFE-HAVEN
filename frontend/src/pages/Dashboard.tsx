@@ -1,4 +1,5 @@
 import { useWallet } from '../context/WalletContext'
+import { useContractLogs } from '../context/ContractLogsContext'
 import { useDeposits } from '../hooks/useDeposits'
 import type { ContractInfo } from '../App'
 import { DepositCard } from '../components/DepositCard'
@@ -16,6 +17,7 @@ interface DashboardProps {
 export function Dashboard({ contractInfo }: DashboardProps) {
   const { wallet, isRestoringSession, signTransaction } = useWallet()
   const { deposits, loading, error, refresh, pollRemoveDeposit } = useDeposits(wallet?.address ?? null)
+  const { addLog, updateLog } = useContractLogs()
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash,   setTxHash]   = useState<string | undefined>()
   const [txError,  setTxError]  = useState<string | undefined>()
@@ -27,6 +29,14 @@ export function Dashboard({ contractInfo }: DashboardProps) {
     setTxStatus('signing')
     setTxError(undefined)
     setTxHash(undefined)
+
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'withdraw',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: { depositId },
+    })
 
     try {
       const xdr = await buildWithdraw(wallet.address, depositId)
@@ -43,26 +53,46 @@ export function Dashboard({ contractInfo }: DashboardProps) {
         if (result.success) {
           setTxStatus('success')
           setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
           toast.success('Withdrawal successful!')
           // Poll for individual deposit removal instead of full refresh
           await pollRemoveDeposit(depositId)
         } else {
           setTxStatus('error')
           setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
           toast.error(result.error ?? 'Withdrawal failed')
         }
       } else if (sigResult.rejected) {
         // User rejected: silently reset state
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
       } else {
         // Signing error: already toasted, but still reset state
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
       return
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unexpected error'
       setTxStatus('error')
       setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
       toast.error(msg)
     } finally {
       setPendingId(null)
@@ -75,6 +105,14 @@ export function Dashboard({ contractInfo }: DashboardProps) {
     setTxStatus('signing')
     setTxError(undefined)
     setTxHash(undefined)
+
+    // Add pending log entry
+    const logId = addLog({
+      operation: 'cancel_deposit',
+      status: 'pending',
+      initiator: wallet.address,
+      parameters: { depositId },
+    })
 
     try {
       const xdr = await buildCancelDeposit(wallet.address, depositId)
@@ -91,26 +129,46 @@ export function Dashboard({ contractInfo }: DashboardProps) {
         if (result.success) {
           setTxStatus('success')
           setTxHash(result.txHash)
+          updateLog(logId, {
+            status: 'success',
+            txHash: result.txHash,
+          })
           toast.success('Deposit cancelled.')
           // Poll for individual deposit removal instead of full refresh
           await pollRemoveDeposit(depositId)
         } else {
           setTxStatus('error')
           setTxError(result.error)
+          updateLog(logId, {
+            status: 'error',
+            errorMessage: result.error,
+          })
           toast.error(result.error ?? 'Cancel failed')
         }
       } else if (sigResult.rejected) {
         // User rejected: silently reset state
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: 'User rejected the transaction',
+        })
       } else {
         // Signing error: already toasted, but still reset state
         setTxStatus('idle')
+        updateLog(logId, {
+          status: 'error',
+          errorMessage: sigResult.error,
+        })
       }
       return
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unexpected error'
       setTxStatus('error')
       setTxError(msg)
+      updateLog(logId, {
+        status: 'error',
+        errorMessage: msg,
+      })
       toast.error(msg)
     } finally {
       setPendingId(null)

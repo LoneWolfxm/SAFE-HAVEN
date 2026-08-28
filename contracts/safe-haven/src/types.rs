@@ -65,6 +65,15 @@ pub enum VaultKey {
     MaxDeposit,
     MaxLockSecs,
     Paused,
+    /// Boolean membership flag for the token allowlist.
+    AllowedToken(Address),
+    /// When true, deposits may use only tokens in the allowlist.
+    StrictTokenAllowlist,
+    /// Stores the token vetting workflow state.
+    TokenVetting(Address),
+    ProposalCounter,
+    GovernanceProposal(u32),
+    GovernanceVote(u32, Address),
     /// Persists the schema version written by the last `migrate()` call (or 1
     /// for contracts that were initialized before versioning was introduced).
     StorageVersion,

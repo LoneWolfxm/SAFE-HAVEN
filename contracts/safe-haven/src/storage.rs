@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{token, Address, Env, Vec};
 
 use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
 
@@ -99,6 +99,18 @@ pub fn remove_active_deposit_id(env: &Env, depositor: &Address, deposit_id: u32)
 /// ledger-based.
 pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     get_active_ids(env, depositor)
+}
+
+pub fn get_voting_power(env: &Env, voter: &Address) -> i128 {
+    let mut total = 0i128;
+    for deposit_id in get_active_ids(env, voter).iter() {
+        if let Some(entry) = get_deposit_readonly(env, voter, deposit_id) {
+            total = total.saturating_add(entry.amount);
+        } else if let Some(entry) = get_deposit_by_ledger_readonly(env, voter, deposit_id) {
+            total = total.saturating_add(entry.amount);
+        }
+    }
+    total
 }
 
 // ----------------------------------------------------------------
@@ -452,6 +464,89 @@ pub fn is_paused(env: &Env) -> bool {
         .persistent()
         .get::<VaultKey, bool>(&VaultKey::Paused)
         .unwrap_or(false)
+}
+
+// ----------------------------------------------------------------
+//  Token allowlist helpers
+// ----------------------------------------------------------------
+
+pub fn set_token_allowed(env: &Env, token: &Address, allowed: bool) {
+    let key = VaultKey::AllowedToken(token.clone());
+    if allowed {
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+pub fn is_token_allowed(env: &Env, token: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::AllowedToken(token.clone()))
+        .unwrap_or(false)
+}
+
+pub fn set_strict_token_allowlist(env: &Env, strict: bool) {
+    let key = VaultKey::StrictTokenAllowlist;
+    env.storage().persistent().set(&key, &strict);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn is_strict_token_allowlist(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::StrictTokenAllowlist)
+        .unwrap_or(false)
+}
+
+// ----------------------------------------------------------------
+//  Token vetting workflow helpers
+// ----------------------------------------------------------------
+
+pub fn set_token_vetting(env: &Env, token: &Address, vetting: &TokenVetting) {
+    let key = VaultKey::TokenVetting(token.clone());
+    env.storage().persistent().set(&key, vetting);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_token_vetting(env: &Env, token: &Address) -> Option<TokenVetting> {
+    env.storage()
+        .persistent()
+        .get(&VaultKey::TokenVetting(token.clone()))
+}
+
+pub fn next_proposal_id(env: &Env) -> u32 {
+    let id: u32 = env.storage().persistent().get(&VaultKey::ProposalCounter).unwrap_or(0);
+    env.storage().persistent().set(&VaultKey::ProposalCounter, &(id + 1));
+    env.storage().persistent().extend_ttl(&VaultKey::ProposalCounter, BUMP_THRESHOLD, BUMP_TARGET);
+    id
+}
+
+pub fn set_governance_proposal(env: &Env, id: u32, proposal: &GovernanceProposal) {
+    let key = VaultKey::GovernanceProposal(id);
+    env.storage().persistent().set(&key, proposal);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_governance_proposal(env: &Env, id: u32) -> Option<GovernanceProposal> {
+    env.storage().persistent().get(&VaultKey::GovernanceProposal(id))
+}
+
+pub fn has_governance_vote(env: &Env, id: u32, voter: &Address) -> bool {
+    env.storage().persistent().get::<VaultKey, bool>(&VaultKey::GovernanceVote(id, voter.clone())).unwrap_or(false)
+}
+
+pub fn set_governance_vote(env: &Env, id: u32, voter: &Address) {
+    let key = VaultKey::GovernanceVote(id, voter.clone());
+    env.storage().persistent().set(&key, &true);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
 /// Returns the raw append-only depositor list (may contain stale entries after
@@ -902,4 +997,36 @@ pub fn remove_upgrade(env: &Env) {
     env.storage()
         .persistent()
         .remove(&VaultKey::PendingUpgrade);
+}
+
+pub fn set_faucet_asset(env: &Env, asset: &FaucetAsset, token: &Address, max_amount: i128) {
+    env.storage().persistent().set(&VaultKey::FaucetToken(asset.clone()), token);
+    env.storage().persistent().set(&VaultKey::FaucetMaxAmount(asset.clone()), &max_amount);
+    env.storage().persistent().extend_ttl(&VaultKey::FaucetToken(asset.clone()), BUMP_THRESHOLD, BUMP_TARGET);
+    env.storage().persistent().extend_ttl(&VaultKey::FaucetMaxAmount(asset.clone()), BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_faucet_status(env: &Env, asset: &FaucetAsset) -> FaucetStatus {
+    let token = env.storage().persistent().get(&VaultKey::FaucetToken(asset.clone()));
+    let max_amount = env.storage().persistent().get(&VaultKey::FaucetMaxAmount(asset.clone())).unwrap_or(0);
+    let request_count = env.storage().persistent().get(&VaultKey::FaucetRequestCount(asset.clone())).unwrap_or(0);
+    let distributed = env.storage().persistent().get(&VaultKey::FaucetDistributed(asset.clone())).unwrap_or(0);
+    let balance = token.as_ref().map(|address: &Address| token::Client::new(env, address).balance(&env.current_contract_address())).unwrap_or(0);
+    FaucetStatus { token, balance, max_amount, request_count, distributed }
+}
+
+pub fn get_faucet_last_request(env: &Env, account: &Address) -> Option<u64> {
+    env.storage().persistent().get(&VaultKey::FaucetLastRequest(account.clone()))
+}
+
+pub fn record_faucet_request(env: &Env, account: &Address, asset: &FaucetAsset, amount: i128, now: u64) {
+    let last_key = VaultKey::FaucetLastRequest(account.clone());
+    env.storage().persistent().set(&last_key, &now);
+    env.storage().persistent().extend_ttl(&last_key, BUMP_THRESHOLD, BUMP_TARGET);
+    let count_key = VaultKey::FaucetRequestCount(asset.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    env.storage().persistent().set(&count_key, &count.saturating_add(1));
+    let total_key = VaultKey::FaucetDistributed(asset.clone());
+    let total: i128 = env.storage().persistent().get(&total_key).unwrap_or(0);
+    env.storage().persistent().set(&total_key, &total.saturating_add(amount));
 }

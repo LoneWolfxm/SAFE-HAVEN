@@ -116,6 +116,66 @@ fn advance_time(env: &Env, seconds: u64) {
     });
 }
 
+struct UpgradeHarness {
+    env: Env,
+    vault: SafeHavenClient<'static>,
+    admin: Address,
+    alice: Address,
+    fee_recipient: Address,
+    token: Address,
+}
+
+impl UpgradeHarness {
+    fn new() -> Self {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let vault_id = env.register(SafeHaven, ());
+        let vault = SafeHavenClient::new(&env, &vault_id);
+        let admin: Address = Address::generate(&env);
+        let alice: Address = Address::generate(&env);
+        let fee_recipient: Address = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_id.address();
+
+        StellarAssetClient::new(&env, &token).mint(&alice, &10_000);
+        vault.initialize(&admin, &fee_recipient, &None, &None);
+
+        Self {
+            env,
+            vault,
+            admin,
+            alice,
+            fee_recipient,
+            token,
+        }
+    }
+
+    fn simulate_legacy_state(&self) {
+        self.env.storage().persistent().remove(&VaultKey::StorageVersion);
+    }
+
+    fn assert_legacy_state(&self) {
+        assert_eq!(self.vault.get_storage_version(), None);
+    }
+
+    fn assert_upgrade_applied(&self) {
+        assert!(self.vault.migrate(&self.admin), "first migrate call should return true");
+        assert_eq!(self.vault.get_storage_version(), Some(1));
+    }
+
+    fn assert_upgrade_idempotent(&self) {
+        let migrated_again = self.vault.migrate(&self.admin);
+        assert!(!migrated_again, "second migrate call should return false");
+        assert_eq!(self.vault.get_storage_version(), Some(1));
+    }
+
+    fn deposit_legacy_entry(&self, amount: i128, unlock_time: u64) -> u32 {
+        self.vault
+            .deposit(&self.alice, &self.token, &amount, &unlock_time, &0)
+    }
+}
+
 // ================================================================
 //  Initialization
 // ================================================================
@@ -155,6 +215,170 @@ fn test_is_initialized() {
 
     vault.renounce_admin(&admin);
     assert!(vault.is_initialized());
+}
+
+#[test]
+fn test_token_allowlist_is_permissive_by_default() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    assert!(!vault.is_strict_mode());
+    assert!(!vault.is_token_allowed(&token));
+    assert!(vault.deposit(&alice, &token, &1_000, &unlock_time, &0) == 0);
+}
+
+#[test]
+fn test_admin_can_manage_allowed_tokens() {
+    let (env, vault, token, admin, _alice, _fee) = setup();
+    let other_token: Address = Address::generate(&env);
+
+    assert!(!vault.is_token_allowed(&token));
+    vault.add_allowed_token(&admin, &token);
+    assert!(vault.is_token_allowed(&token));
+    assert!(!vault.is_token_allowed(&other_token));
+
+    vault.remove_allowed_token(&admin, &token);
+    assert!(!vault.is_token_allowed(&token));
+}
+
+#[test]
+fn test_strict_mode_rejects_tokens_outside_allowlist() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    vault.set_strict_mode(&admin, &true);
+    assert!(vault.is_strict_mode());
+    assert_eq!(
+        vault.try_deposit(&alice, &token, &1_000, &unlock_time, &0),
+        Err(Ok(VaultError::TokenNotAllowed))
+    );
+
+    vault.add_allowed_token(&admin, &token);
+    assert!(vault.deposit(&alice, &token, &1_000, &unlock_time, &0) == 0);
+    assert_eq!(vault.toggle_strict_mode(&admin), false);
+    assert!(!vault.is_strict_mode());
+}
+
+#[test]
+fn test_strict_mode_rejects_all_deposit_entrypoints() {
+    let (env, vault, _token, admin, alice, _fee) = setup();
+    let rejected_token: Address = Address::generate(&env);
+    let unlock_time = env.ledger().timestamp() + 3600;
+    let unlock_ledger = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+
+    vault.set_strict_mode(&admin, &true);
+    assert_eq!(
+        vault.try_deposit_for(&alice, &alice, &rejected_token, &1_000, &unlock_time, &0),
+        Err(Ok(VaultError::TokenNotAllowed))
+    );
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &rejected_token, &1_000, &unlock_ledger, &0),
+        Err(Ok(VaultError::TokenNotAllowed))
+    );
+}
+
+#[test]
+fn test_allowlist_controls_require_admin() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+    let non_admin: Address = Address::generate(&env);
+
+    assert_eq!(
+        vault.try_add_allowed_token(&non_admin, &token),
+        Err(Ok(VaultError::Unauthorized))
+    );
+    assert_eq!(
+        vault.try_set_strict_mode(&non_admin, &true),
+        Err(Ok(VaultError::Unauthorized))
+    );
+}
+
+#[test]
+fn test_token_vetting_propose_review_approve_workflow() {
+    let (env, vault, _token, admin, alice, _fee) = setup();
+    let token: Address = Address::generate(&env);
+
+    vault.propose_token(&alice, &token);
+    let proposal = vault.get_token_vetting(&token).expect("proposal should exist");
+    assert_eq!(proposal.proposer, alice);
+    assert!(!proposal.reviewed);
+    assert!(!proposal.approved);
+
+    assert_eq!(
+        vault.try_approve_token(&admin, &token),
+        Err(Ok(VaultError::TokenReviewRequired))
+    );
+    vault.review_token(&admin, &token, &true);
+    assert!(!vault.get_token_vetting(&token).unwrap().approved);
+
+    vault.approve_token(&admin, &token);
+    assert!(vault.is_token_allowed(&token));
+    assert!(vault.get_token_vetting(&token).unwrap().approved);
+}
+
+#[test]
+fn test_token_vetting_failed_review_cannot_be_approved() {
+    let (env, vault, _token, admin, alice, _fee) = setup();
+    let token: Address = Address::generate(&env);
+
+    vault.propose_token(&alice, &token);
+    vault.review_token(&admin, &token, &false);
+    assert_eq!(
+        vault.try_approve_token(&admin, &token),
+        Err(Ok(VaultError::TokenReviewRequired))
+    );
+    assert!(!vault.is_token_allowed(&token));
+}
+
+#[test]
+fn test_community_governance_uses_deposit_weight_and_timelock() {
+    let (env, vault, token, admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&alice, &1_000);
+    StellarAssetClient::new(&env, &token).mint(&bob, &2_000);
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&alice, &token, &1_000, &unlock_time, &0);
+    vault.deposit(&bob, &token, &2_000, &unlock_time, &0);
+
+    let proposal_id = vault.propose_pause(&alice, &GovernanceMode::CommunityVote);
+    assert_eq!(vault.get_voting_power(&alice), 1_000);
+    assert_eq!(vault.vote(&proposal_id, &alice, &true), 1_000);
+    assert_eq!(vault.vote(&proposal_id, &bob, &false), 2_000);
+    assert!(!vault.proposal_passed(&proposal_id));
+    assert_eq!(
+        vault.try_execute_proposal(&proposal_id),
+        Err(Ok(VaultError::VotingStillOpen))
+    );
+
+    advance_time(&env, 86_400 + 86_400);
+    assert_eq!(
+        vault.try_execute_proposal(&proposal_id),
+        Err(Ok(VaultError::ProposalRejected))
+    );
+    assert!(!vault.is_paused());
+}
+
+#[test]
+fn test_admin_governance_requires_admin_and_prevents_double_vote() {
+    let (env, vault, _token, admin, alice, _fee) = setup();
+    let proposal_id = vault.propose_pause(&admin, &GovernanceMode::AdminVote);
+
+    assert_eq!(vault.vote(&proposal_id, &admin, &true), 1);
+    assert_eq!(
+        vault.try_vote(&proposal_id, &admin, &true),
+        Err(Ok(VaultError::AlreadyVoted))
+    );
+    assert_eq!(
+        vault.try_vote(&proposal_id, &alice, &true),
+        Err(Ok(VaultError::Unauthorized))
+    );
+
+    advance_time(&env, 86_400 + 86_400);
+    vault.execute_proposal(&proposal_id);
+    assert!(vault.is_paused());
+    assert_eq!(
+        vault.try_execute_proposal(&proposal_id),
+        Err(Ok(VaultError::ProposalAlreadyExecuted))
+    );
 }
 
 // ================================================================
@@ -2170,6 +2394,29 @@ fn test_bump_threshold_derived_from_bump_target() {
 fn test_get_storage_version_unset() {
     let (_env, vault, _token, _admin, _alice, _fee) = setup();
     assert_eq!(vault.get_storage_version(), None);
+}
+
+/// The upgrade harness simulates a legacy deployment with no stored version key,
+/// then verifies the migration path writes version 1 and remains idempotent.
+#[test]
+fn test_upgrade_harness_handles_legacy_deploy() {
+    let harness = UpgradeHarness::new();
+    let unlock_time = harness.env.ledger().timestamp() + 3600;
+    let deposit_id = harness.deposit_legacy_entry(1_000, unlock_time);
+
+    harness.simulate_legacy_state();
+    harness.assert_legacy_state();
+
+    let legacy_entry = harness.vault.get_vault(&harness.alice, &deposit_id).expect("legacy deposit should remain readable");
+    assert_eq!(legacy_entry.amount, 1_000);
+    assert_eq!(legacy_entry.unlock_time, unlock_time);
+
+    harness.assert_upgrade_applied();
+    harness.assert_upgrade_idempotent();
+
+    let migrated_entry = harness.vault.get_vault(&harness.alice, &deposit_id).expect("deposit should survive migration");
+    assert_eq!(migrated_entry.amount, 1_000);
+    assert_eq!(migrated_entry.unlock_time, unlock_time);
 }
 
 /// migrate() sets the version to STORAGE_VERSION and returns true.

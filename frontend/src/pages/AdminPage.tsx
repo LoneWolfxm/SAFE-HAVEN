@@ -59,6 +59,10 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
   const [renounceTxHash,      setRenounceTxHash]      = useState<string | undefined>()
   const [renounceTxError,     setRenounceTxError]     = useState<string | undefined>()
 
+  // 2FA states
+  const [show2FA, setShow2FA] = useState(false)
+  const [pendingAction, setPendingAction] = useState<'pause' | 'unpause' | 'emergency' | null>(null)
+
   const isAdmin = wallet?.address === contractInfo.admin
   const pausePending = pauseTxStatus === 'signing' || pauseTxStatus === 'submitting' || pauseTxStatus === 'confirming'
   const emrgPending  = emrgTxStatus  === 'signing' || emrgTxStatus  === 'submitting' || emrgTxStatus  === 'confirming'
@@ -136,6 +140,20 @@ export function AdminPage({ contractInfo, onContractInfoRefresh }: AdminPageProp
   async function handleEmergencyWithdraw(e: React.FormEvent) {
     e.preventDefault()
     if (!wallet || !emrgDepositor || !emrgDepositId || !emrgDepositorIsValid) return
+
+    // Check if 2FA is required
+    if (twoFAState.enabled) {
+      setPendingAction('emergency')
+      setShow2FA(true)
+      return
+    }
+
+    // Proceed without 2FA
+    await executeEmergencyWithdraw()
+  }
+
+  async function executeEmergencyWithdraw() {
+    if (!wallet || !emrgDepositor || !emrgDepositId) return
 
     setEmrgTxStatus('signing')
     setEmrgTxError(undefined)

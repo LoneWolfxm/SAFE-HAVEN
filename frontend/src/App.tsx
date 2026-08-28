@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { WalletProvider, useWallet } from './context/WalletContext'
+import { NetworkProvider } from './context/NetworkContext'
+import { SecurityProvider } from './context/SecurityContext'
 import { useContractInfo } from './hooks/useContractInfo'
 import { Header } from './components/Header'
 import { TabNav } from './components/TabNav'
@@ -7,7 +9,9 @@ import { WalletInfoModal } from './components/WalletInfoModal'
 import { Dashboard } from './pages/Dashboard'
 import { DepositPage } from './pages/DepositPage'
 import { WithdrawPage } from './pages/WithdrawPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { AdminPage } from './pages/AdminPage'
+import { ContractExplorer } from './pages/ContractExplorer'
 import type { PageTab } from './types'
 
 // Re-export ContractInfo shape so pages can import it from App
@@ -17,6 +21,7 @@ export interface ContractInfo {
   paused: boolean
   maxDeposit: bigint
   maxLockSecs: number
+  version: number | null
   depositorCount: number
   feeRecipient: string | null
   loading: boolean
@@ -37,6 +42,7 @@ function AppInner() {
   return (
     <div className="min-h-screen flex flex-col">
       <Header isPaused={contractInfo.paused} />
+      <PausedNotice />
 
       <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-4 md:py-8">
         {/* Page header */}
@@ -46,13 +52,17 @@ function AppInner() {
               {activeTab === 'dashboard' && 'My Vaults'}
               {activeTab === 'deposit'   && 'New Deposit'}
               {activeTab === 'withdraw'  && 'Withdraw'}
+              {activeTab === 'settings'  && 'Settings'}
               {activeTab === 'admin'     && 'Admin Panel'}
+              {activeTab === 'logs'      && 'Contract Operations Log'}
             </h1>
             <p className="text-xs md:text-sm text-slate-400 mt-0.5">
               {activeTab === 'dashboard' && 'View and manage all your time-locked deposits'}
               {activeTab === 'deposit'   && 'Lock tokens until a future date'}
               {activeTab === 'withdraw'  && 'Withdraw unlocked tokens or cancel early'}
+              {activeTab === 'settings'  && 'Manage recovery contacts and account protection'}
               {activeTab === 'admin'     && 'Contract administration controls'}
+              {activeTab === 'logs'      && 'Track all contract operations and transactions'}
             </p>
           </div>
 
@@ -70,6 +80,9 @@ function AppInner() {
         )}
         {activeTab === 'withdraw' && (
           <WithdrawPage />
+        )}
+        {activeTab === 'settings' && (
+          <SettingsPage />
         )}
         {activeTab === 'admin' && (
           <AdminPage contractInfo={contractInfo} onContractInfoRefresh={contractInfo.refresh} />
@@ -93,6 +106,30 @@ function AppInner() {
               <span className="hidden sm:inline">GitHub</span>
             </a>
             <a
+              href="https://github.com/shortheartone/SAFE-HAVEN/blob/main/docs/USER_ONBOARDING.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-slate-300 transition-colors"
+            >
+              User Guide
+            </a>
+            <a
+              href="https://github.com/shortheartone/SAFE-HAVEN/blob/main/docs/ROADMAP.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-slate-300 transition-colors"
+            >
+              Roadmap
+            </a>
+            <a
+              href="https://github.com/shortheartone/SAFE-HAVEN/blob/main/docs/OPERATOR_PERFORMANCE.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-slate-300 transition-colors"
+            >
+              Operator Guide
+            </a>
+            <a
               href="https://developers.stellar.org/docs/smart-contracts"
               target="_blank"
               rel="noopener noreferrer"
@@ -112,8 +149,12 @@ function AppInner() {
 
 export default function App() {
   return (
-    <WalletProvider>
-      <AppInner />
-    </WalletProvider>
+    <SecurityProvider>
+      <NetworkProvider>
+        <WalletProvider>
+          <AppInner />
+        </WalletProvider>
+      </NetworkProvider>
+    </SecurityProvider>
   )
 }

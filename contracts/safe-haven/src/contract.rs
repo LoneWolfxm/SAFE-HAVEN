@@ -107,6 +107,153 @@ fn check_whitelist(
 
 #[contractimpl]
 impl SafeHaven {
+    pub fn propose_upgrade(
+        env: Env, proposer: Address, old_version: soroban_sdk::String,
+        new_version: soroban_sdk::String, diff_url: soroban_sdk::String,
+        audit_url: soroban_sdk::String, wasm_hash: soroban_sdk::BytesN<32>,
+    ) -> Result<u32, VaultError> {
+        proposer.require_auth();
+        if diff_url.is_empty() || audit_url.is_empty() { return Err(VaultError::UpgradeEvidenceRequired); }
+        let id_key = crate::types::VaultKey::NextUpgradeId;
+        let id: u32 = env.storage().persistent().get(&id_key).unwrap_or(0);
+        env.storage().persistent().set(&id_key, &id.saturating_add(1));
+        let proposal = UpgradeProposal {
+            id, proposer, old_version, new_version, diff_url, audit_url,
+            review_url: soroban_sdk::String::from_slice(&env, ""), wasm_hash,
+            status: UpgradeStatus::Review, approval_votes: 0, rejection_votes: 0,
+            veto_votes: 0, approved_at: None,
+        };
+        env.storage().persistent().set(&crate::types::VaultKey::UpgradeProposal(id), &proposal);
+        Ok(id)
+    }
+
+    pub fn review_upgrade(
+        env: Env, reviewer: Address, proposal_id: u32, review_url: soroban_sdk::String,
+        security_audit_complete: bool,
+    ) -> Result<(), VaultError> {
+        reviewer.require_auth();
+        let key = crate::types::VaultKey::UpgradeProposal(proposal_id);
+        let mut proposal: UpgradeProposal = env.storage().persistent().get(&key).ok_or(VaultError::UpgradeNotFound)?;
+        if proposal.status != UpgradeStatus::Review || reviewer == proposal.proposer || review_url.is_empty() || !security_audit_complete {
+            return Err(VaultError::UpgradeReviewRequired);
+        }
+        proposal.review_url = review_url;
+        proposal.status = UpgradeStatus::Voting;
+        env.storage().persistent().set(&key, &proposal);
+        Ok(())
+    }
+
+    pub fn vote_upgrade(env: Env, voter: Address, proposal_id: u32, approve: bool) -> Result<(), VaultError> {
+        voter.require_auth();
+        let key = crate::types::VaultKey::UpgradeProposal(proposal_id);
+        let mut proposal: UpgradeProposal = env.storage().persistent().get(&key).ok_or(VaultError::UpgradeNotFound)?;
+        if proposal.status != UpgradeStatus::Voting { return Err(VaultError::UpgradeNotVoting); }
+        let vote_key = crate::types::VaultKey::UpgradeVote(proposal_id, voter);
+        if env.storage().persistent().has(&vote_key) { return Err(VaultError::UpgradeAlreadyVoted); }
+        env.storage().persistent().set(&vote_key, &approve);
+        if approve { proposal.approval_votes = proposal.approval_votes.saturating_add(1); }
+        else { proposal.rejection_votes = proposal.rejection_votes.saturating_add(1); }
+        if proposal.approval_votes >= MIN_UPGRADE_APPROVALS {
+            proposal.status = UpgradeStatus::Approved;
+            proposal.approved_at = Some(env.ledger().timestamp());
+        }
+        env.storage().persistent().set(&key, &proposal);
+        Ok(())
+    }
+
+    pub fn veto_upgrade(env: Env, voter: Address, proposal_id: u32) -> Result<(), VaultError> {
+        voter.require_auth();
+        let key = crate::types::VaultKey::UpgradeProposal(proposal_id);
+        let mut proposal: UpgradeProposal = env.storage().persistent().get(&key).ok_or(VaultError::UpgradeNotFound)?;
+        if proposal.status != UpgradeStatus::Approved { return Err(VaultError::UpgradeNotApproved); }
+        let veto_key = crate::types::VaultKey::UpgradeVeto(proposal_id, voter);
+        if env.storage().persistent().has(&veto_key) { return Err(VaultError::UpgradeAlreadyVoted); }
+        env.storage().persistent().set(&veto_key, &true);
+        proposal.veto_votes = proposal.veto_votes.saturating_add(1);
+        proposal.status = UpgradeStatus::Vetoed;
+        env.storage().persistent().set(&key, &proposal);
+        Ok(())
+    }
+
+    pub fn execute_upgrade(env: Env, proposal_id: u32) -> Result<(), VaultError> {
+        let key = crate::types::VaultKey::UpgradeProposal(proposal_id);
+        let mut proposal: UpgradeProposal = env.storage().persistent().get(&key).ok_or(VaultError::UpgradeNotFound)?;
+        if proposal.status != UpgradeStatus::Approved { return Err(VaultError::UpgradeNotApproved); }
+        let approved_at = proposal.approved_at.ok_or(VaultError::UpgradeNotApproved)?;
+        if env.ledger().timestamp() < approved_at.saturating_add(UPGRADE_TIMELOCK_SECS) { return Err(VaultError::UpgradeTimelocked); }
+        env.deployer().update_current_contract_wasm(proposal.wasm_hash);
+        proposal.status = UpgradeStatus::Executed;
+        env.storage().persistent().set(&key, &proposal);
+        Ok(())
+    }
+
+    pub fn get_upgrade_proposal(env: Env, proposal_id: u32) -> Option<UpgradeProposal> {
+        env.storage().persistent().get(&crate::types::VaultKey::UpgradeProposal(proposal_id))
+    }
+
+    // ----------------------------------------------------------------
+    //  Faucet
+    // ----------------------------------------------------------------
+
+    pub fn configure_faucet_asset(
+        env: Env,
+        admin: Address,
+        asset: FaucetAsset,
+        token: Address,
+        max_amount: i128,
+    ) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        if max_amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        storage::set_faucet_asset(&env, &asset, &token, max_amount);
+        Ok(())
+    }
+
+    pub fn fund_faucet(env: Env, admin: Address, token: Address, amount: i128) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        token::Client::new(&env, &token).transfer(&admin, &env.current_contract_address(), &amount);
+        Ok(())
+    }
+
+    pub fn request_faucet(env: Env, account: Address, asset: FaucetAsset, amount: i128) -> Result<(), VaultError> {
+        account.require_auth();
+        if storage::is_paused(&env) {
+            return Err(VaultError::ContractPaused);
+        }
+        let status = storage::get_faucet_status(&env, &asset);
+        let token = status.token.ok_or(VaultError::FaucetNotConfigured)?;
+        if amount <= 0 || amount > status.max_amount {
+            return Err(VaultError::FaucetAmountTooLarge);
+        }
+        let now = env.ledger().timestamp();
+        if let Some(last_request) = storage::get_faucet_last_request(&env, &account) {
+            if now < last_request.saturating_add(3600) {
+                return Err(VaultError::FaucetRateLimited);
+            }
+        }
+        if status.balance < amount {
+            return Err(VaultError::FaucetInsufficientFunds);
+        }
+        token::Client::new(&env, &token).transfer(&env.current_contract_address(), &account, &amount);
+        storage::record_faucet_request(&env, &account, &asset, amount, now);
+        events::faucet_claim(&env, &account, asset, amount);
+        Ok(())
+    }
+
+    pub fn get_faucet_status(env: Env, asset: FaucetAsset) -> FaucetStatus {
+        storage::get_faucet_status(&env, &asset)
+    }
+
+    pub fn get_faucet_last_request(env: Env, account: Address) -> Option<u64> {
+        storage::get_faucet_last_request(&env, &account)
+    }
+
     // ----------------------------------------------------------------
     //  Initialization
     // ----------------------------------------------------------------
@@ -171,6 +318,10 @@ impl SafeHaven {
 
         if storage::is_paused(&env) {
             return Err(VaultError::ContractPaused);
+        }
+
+        if storage::is_strict_token_allowlist(&env) && !storage::is_token_allowed(&env, &token) {
+            return Err(VaultError::TokenNotAllowed);
         }
 
         if amount <= 0 {
@@ -314,6 +465,10 @@ impl SafeHaven {
             return Err(VaultError::ContractPaused);
         }
 
+        if storage::is_strict_token_allowlist(&env) && !storage::is_token_allowed(&env, &token) {
+            return Err(VaultError::TokenNotAllowed);
+        }
+
         if amount <= 0 {
             return Err(VaultError::InvalidAmount);
         }
@@ -446,6 +601,10 @@ impl SafeHaven {
 
         if storage::is_paused(&env) {
             return Err(VaultError::ContractPaused);
+        }
+
+        if storage::is_strict_token_allowlist(&env) && !storage::is_token_allowed(&env, &token) {
+            return Err(VaultError::TokenNotAllowed);
         }
 
         if amount <= 0 {
@@ -1491,6 +1650,142 @@ impl SafeHaven {
     }
 
     // ----------------------------------------------------------------
+    //  Governance: proposal, weighted voting, and timelocked execution
+    // ----------------------------------------------------------------
+
+    pub fn propose_pause(env: Env, proposer: Address, mode: GovernanceMode) -> Result<u32, VaultError> {
+        proposer.require_auth();
+        if matches!(mode, GovernanceMode::AdminVote) {
+            storage::require_admin(&env, &proposer)?;
+        }
+        let created_at = env.ledger().timestamp();
+        let proposal_id = storage::next_proposal_id(&env);
+        storage::set_governance_proposal(&env, proposal_id, &GovernanceProposal {
+            proposer: proposer.clone(),
+            action: GovernanceAction::Pause,
+            mode,
+            created_at,
+            voting_ends_at: created_at.saturating_add(crate::constants::GOVERNANCE_VOTING_PERIOD_SECS),
+            executable_at: created_at
+                .saturating_add(crate::constants::GOVERNANCE_VOTING_PERIOD_SECS)
+                .saturating_add(crate::constants::GOVERNANCE_TIMELOCK_SECS),
+            for_votes: 0,
+            against_votes: 0,
+            executed: false,
+        });
+        events::governance_proposed(&env, proposal_id, &proposer);
+        Ok(proposal_id)
+    }
+
+    pub fn vote(env: Env, proposal_id: u32, voter: Address, support: bool) -> Result<i128, VaultError> {
+        voter.require_auth();
+        let mut proposal = storage::get_governance_proposal(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+        if env.ledger().timestamp() >= proposal.voting_ends_at {
+            return Err(VaultError::VotingEnded);
+        }
+        if storage::has_governance_vote(&env, proposal_id, &voter) {
+            return Err(VaultError::AlreadyVoted);
+        }
+
+        let weight = match proposal.mode {
+            GovernanceMode::AdminVote => {
+                storage::require_admin(&env, &voter)?;
+                1
+            }
+            GovernanceMode::CommunityVote => storage::get_voting_power(&env, &voter),
+        };
+        if weight <= 0 {
+            return Err(VaultError::NoVotingPower);
+        }
+        if support {
+            proposal.for_votes = proposal.for_votes.saturating_add(weight);
+        } else {
+            proposal.against_votes = proposal.against_votes.saturating_add(weight);
+        }
+        storage::set_governance_proposal(&env, proposal_id, &proposal);
+        storage::set_governance_vote(&env, proposal_id, &voter);
+        events::governance_voted(&env, proposal_id, &voter, support, weight);
+        Ok(weight)
+    }
+
+    pub fn execute_proposal(env: Env, proposal_id: u32) -> Result<(), VaultError> {
+        let mut proposal = storage::get_governance_proposal(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+        if proposal.executed {
+            return Err(VaultError::ProposalAlreadyExecuted);
+        }
+        let now = env.ledger().timestamp();
+        if now < proposal.voting_ends_at {
+            return Err(VaultError::VotingStillOpen);
+        }
+        if now < proposal.executable_at {
+            return Err(VaultError::TimelockActive);
+        }
+        if proposal.for_votes <= proposal.against_votes {
+            return Err(VaultError::ProposalRejected);
+        }
+        match proposal.action {
+            GovernanceAction::Pause => storage::set_paused(&env, true),
+        }
+        proposal.executed = true;
+        storage::set_governance_proposal(&env, proposal_id, &proposal);
+        events::governance_executed(&env, proposal_id);
+        Ok(())
+    }
+
+    pub fn get_proposal(env: Env, proposal_id: u32) -> Option<GovernanceProposal> {
+        storage::get_governance_proposal(&env, proposal_id)
+    }
+
+    pub fn proposal_passed(env: Env, proposal_id: u32) -> Result<bool, VaultError> {
+        let proposal = storage::get_governance_proposal(&env, proposal_id)
+            .ok_or(VaultError::ProposalNotFound)?;
+        Ok(proposal.for_votes > proposal.against_votes)
+    }
+
+    pub fn get_voting_power(env: Env, voter: Address) -> i128 {
+        storage::get_voting_power(&env, &voter)
+    }
+
+    // ----------------------------------------------------------------
+    //  Admin: Token Allowlist
+    // ----------------------------------------------------------------
+
+    pub fn add_allowed_token(env: Env, admin: Address, token: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        storage::set_token_allowed(&env, &token, true);
+        Ok(())
+    }
+
+    pub fn remove_allowed_token(env: Env, admin: Address, token: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        storage::set_token_allowed(&env, &token, false);
+        Ok(())
+    }
+
+    pub fn set_strict_mode(env: Env, admin: Address, strict: bool) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        storage::set_strict_token_allowlist(&env, strict);
+        Ok(())
+    }
+
+    pub fn toggle_strict_mode(env: Env, admin: Address) -> Result<bool, VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+        let strict = !storage::is_strict_token_allowlist(&env);
+        storage::set_strict_token_allowlist(&env, strict);
+        Ok(strict)
+    }
+
+    pub fn is_strict_mode(env: Env) -> bool {
+        storage::is_strict_token_allowlist(&env)
+    }
+
+    // ----------------------------------------------------------------
     //  Admin: Two-Step Admin Transfer
     // ----------------------------------------------------------------
 
@@ -1696,6 +1991,79 @@ impl SafeHaven {
 
     pub fn get_fee_recipient(env: Env) -> Option<Address> {
         storage::get_fee_recipient(&env)
+    }
+
+    pub fn is_token_allowed(env: Env, token: Address) -> bool {
+        storage::is_token_allowed(&env, &token)
+    }
+
+    // ----------------------------------------------------------------
+    //  Token vetting: Propose -> Review -> Approve
+    // ----------------------------------------------------------------
+
+    pub fn propose_token(env: Env, proposer: Address, token: Address) -> Result<(), VaultError> {
+        proposer.require_auth();
+
+        if storage::is_token_allowed(&env, &token) {
+            return Err(VaultError::TokenAlreadyApproved);
+        }
+
+        let vetting = TokenVetting {
+            proposer: proposer.clone(),
+            proposed_at: env.ledger().timestamp(),
+            reviewed: false,
+            review_passed: false,
+            reviewer: None,
+            reviewed_at: None,
+            approved: false,
+        };
+        storage::set_token_vetting(&env, &token, &vetting);
+        events::token_proposed(&env, &token, &proposer);
+        Ok(())
+    }
+
+    pub fn review_token(
+        env: Env,
+        reviewer: Address,
+        token: Address,
+        passed: bool,
+    ) -> Result<(), VaultError> {
+        reviewer.require_auth();
+        storage::require_admin(&env, &reviewer)?;
+
+        let mut vetting = storage::get_token_vetting(&env, &token)
+            .ok_or(VaultError::TokenVettingNotFound)?;
+        vetting.reviewed = true;
+        vetting.review_passed = passed;
+        vetting.reviewer = Some(reviewer.clone());
+        vetting.reviewed_at = Some(env.ledger().timestamp());
+        storage::set_token_vetting(&env, &token, &vetting);
+        events::token_reviewed(&env, &token, &reviewer, passed);
+        Ok(())
+    }
+
+    pub fn approve_token(env: Env, admin: Address, token: Address) -> Result<(), VaultError> {
+        admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+
+        let mut vetting = storage::get_token_vetting(&env, &token)
+            .ok_or(VaultError::TokenVettingNotFound)?;
+        if !vetting.reviewed || !vetting.review_passed {
+            return Err(VaultError::TokenReviewRequired);
+        }
+        if vetting.approved {
+            return Err(VaultError::TokenAlreadyApproved);
+        }
+
+        vetting.approved = true;
+        storage::set_token_vetting(&env, &token, &vetting);
+        storage::set_token_allowed(&env, &token, true);
+        events::token_approved(&env, &token, &admin);
+        Ok(())
+    }
+
+    pub fn get_token_vetting(env: Env, token: Address) -> Option<TokenVetting> {
+        storage::get_token_vetting(&env, &token)
     }
 
     pub fn get_depositor_count(env: Env) -> u32 {
