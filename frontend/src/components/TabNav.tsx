@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { PageTab } from '../types'
 
 interface TabNavProps {
@@ -63,25 +64,83 @@ const tabs: TabDef[] = [
 ]
 
 export function TabNav({ active, onChange, isAdmin }: TabNavProps) {
+  const [isOpen, setIsOpen] = useState(false)
   const visibleTabs = tabs.filter((t) => !t.adminOnly || isAdmin)
 
+  const handleTabClick = (tabId: PageTab) => {
+    onChange(tabId)
+    setIsOpen(false)
+  }
+
   return (
-    <nav className="flex gap-1 p-1 bg-slate-900/60 rounded-xl border border-slate-700/60">
-      {visibleTabs.map((tab) => (
-        <button
-          key={tab.id}
-          onClick={() => onChange(tab.id)}
-          className={[
-            'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all',
-            active === tab.id
-              ? 'bg-stellar-600 text-white shadow-sm'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800',
-          ].join(' ')}
-        >
-          {tab.icon}
-          <span className="hidden sm:inline">{tab.label}</span>
-        </button>
-      ))}
-    </nav>
+    <>
+      {/* Mobile menu button */}
+      <button
+        className="md:hidden flex items-center justify-center w-10 h-10 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+        onClick={() => setIsOpen(!isOpen)}
+        aria-label="Toggle menu"
+      >
+        {isOpen ? (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5">
+            <path d="M3 6h18M3 12h18M3 18h18" />
+          </svg>
+        )}
+      </button>
+
+      {/* Desktop navigation */}
+      <nav className="hidden md:flex gap-1 p-1 bg-slate-900/60 rounded-xl border border-slate-700/60">
+        {visibleTabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => onChange(tab.id)}
+            className={[
+              'flex items-center justify-center gap-2 px-4 py-2.5 min-h-10 rounded-lg text-sm font-medium transition-all',
+              active === tab.id
+                ? 'bg-stellar-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800',
+            ].join(' ')}
+            title={tab.label}
+          >
+            {tab.icon}
+            <span>{tab.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {/* Mobile dropdown menu */}
+      {isOpen && (
+        <div className="md:hidden absolute top-16 right-4 z-40 bg-slate-900 border border-slate-700/60 rounded-xl shadow-lg min-w-48">
+          <nav className="flex flex-col p-2">
+            {visibleTabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => handleTabClick(tab.id)}
+                className={[
+                  'flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium transition-colors w-full text-left min-h-12',
+                  active === tab.id
+                    ? 'bg-stellar-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800',
+                ].join(' ')}
+              >
+                {tab.icon}
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      )}
+
+      {/* Close menu on click outside */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 md:hidden z-30"
+          onClick={() => setIsOpen(false)}
+        />
+      )}
+    </>
   )
 }
