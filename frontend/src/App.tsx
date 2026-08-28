@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { WalletProvider, useWallet } from './context/WalletContext'
+import { PriceProvider } from './context/PriceContext'
 import { useContractInfo } from './hooks/useContractInfo'
 import { Header } from './components/Header'
 import { TabNav } from './components/TabNav'
@@ -105,8 +106,10 @@ function AppInner() {
 
 export default function App() {
   return (
-    <WalletProvider>
-      <AppInner />
-    </WalletProvider>
+    <PriceProvider tokenIds={['native']}>
+      <WalletProvider>
+        <AppInner />
+      </WalletProvider>
+    </PriceProvider>
   )
 }

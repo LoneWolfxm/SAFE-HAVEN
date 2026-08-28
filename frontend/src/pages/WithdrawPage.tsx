@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
+import { usePrice } from '../hooks/usePrice'
 import { TxStatusBadge } from '../components/TxStatusBadge'
 import { buildWithdraw, buildCancelDeposit, submitTx, getVault, getTimeRemaining } from '../lib/stellar'
-import { stroopsToXlm, formatUnlockDate, formatCountdown, formatBps } from '../lib/format'
+import { formatUnlockDate, formatCountdown, formatBps, formatTokenWithUsd, formatPriceUpdate } from '../lib/format'
 import type { TxStatus, VaultEntry } from '../types'
 import { CONFIG } from '../config'
 
 export function WithdrawPage() {
   const { wallet, signTransaction } = useWallet()
+  const { getPrice } = usePrice()
 
   const [depositId, setDepositId] = useState('')
   const [lookedUp,  setLookedUp]  = useState<(VaultEntry & { timeRemaining: number }) | null>(null)
@@ -101,6 +103,11 @@ export function WithdrawPage() {
     : 0n
   const refund     = lookedUp ? lookedUp.amount - penalty : 0n
 
+  // Price data
+  const priceData = isXlm ? getPrice('native') : null
+  const priceUsd = priceData?.usd
+  const priceUpdateStr = priceData ? formatPriceUpdate(priceData.lastUpdated) : null
+
   return (
     <div className="max-w-lg space-y-5">
       {/* Lookup form */}
@@ -150,7 +157,13 @@ export function WithdrawPage() {
 
           <div className="grid grid-cols-2 gap-y-3 text-sm">
             <span className="text-slate-400">Amount</span>
-            <span className="font-medium">{stroopsToXlm(lookedUp.amount)} {isXlm ? 'XLM' : 'tokens'}</span>
+            <span className="font-medium">{formatTokenWithUsd(lookedUp.amount, isXlm ? 'XLM' : 'tokens', priceUsd)}</span>
+            {priceUpdateStr && (
+              <>
+                <span></span>
+                <span className="text-xs text-slate-500">{priceUpdateStr}</span>
+              </>
+            )}
 
             <span className="text-slate-400">Unlocks</span>
             <span>{formatUnlockDate(lookedUp.unlockTime)}</span>
@@ -163,7 +176,7 @@ export function WithdrawPage() {
             {!isUnlocked && lookedUp.penaltyBps > 0 && (
               <>
                 <span className="text-slate-400">You'd receive</span>
-                <span className="text-slate-200">{stroopsToXlm(refund)} {isXlm ? 'XLM' : 'tokens'}</span>
+                <span className="text-slate-200">{formatTokenWithUsd(refund, isXlm ? 'XLM' : 'tokens', priceUsd)}</span>
               </>
             )}
           </div>

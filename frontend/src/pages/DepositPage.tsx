@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
+import { usePrice } from '../hooks/usePrice'
 import { TxStatusBadge } from '../components/TxStatusBadge'
 import { buildDeposit, submitTx } from '../lib/stellar'
-import { xlmToStroops, stroopsToXlm, formatBps } from '../lib/format'
+import { xlmToStroops, stroopsToXlm, formatBps, formatTokenWithUsd, formatPriceUpdate } from '../lib/format'
 import type { TxStatus } from '../types'
 import type { ContractInfo } from '../App'
 import { CONFIG } from '../config'
@@ -15,8 +16,9 @@ interface DepositPageProps {
 
 export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   const { wallet, signTransaction } = useWallet()
+  const { getPrice } = usePrice()
 
-  const [tokenAddress, setTokenAddress] = useState(CONFIG.NATIVE_TOKEN)
+  const [tokenAddress, setTokenAddress] = useState<string>(CONFIG.NATIVE_TOKEN)
   const [amount,       setAmount]       = useState('')
   const [unlockDate,   setUnlockDate]   = useState('')
   const [penaltyBps,   setPenaltyBps]   = useState('0')
@@ -31,6 +33,12 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   const unlockTimestamp = unlockDate ? Math.floor(new Date(unlockDate).getTime() / 1000) : 0
   const nowSecs         = Math.floor(Date.now() / 1000)
   const lockDuration    = unlockTimestamp - nowSecs
+
+  // Price data (only XLM for now)
+  const isXlm = tokenAddress === CONFIG.NATIVE_TOKEN
+  const priceData = isXlm ? getPrice('native') : null
+  const priceUsd = priceData?.usd
+  const priceUpdateStr = priceData ? formatPriceUpdate(priceData.lastUpdated) : null
 
   const errors = {
     amount:    !amount ? '' : isNaN(amountNum) || amountNum <= 0 ? 'Amount must be > 0' :
@@ -182,7 +190,10 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
           {amount && unlockDate && !errors.amount && !errors.unlock && (
             <div className="bg-slate-800/60 rounded-xl p-4 text-sm space-y-1.5">
               <p className="text-slate-400 text-xs uppercase tracking-wide font-medium mb-2">Summary</p>
-              <Row label="Locking" value={`${amount} XLM`} />
+              <Row label="Locking" value={formatTokenWithUsd(xlmToStroops(amount), 'XLM', priceUsd)} />
+              {priceUpdateStr && (
+                <p className="text-xs text-slate-500">{priceUpdateStr}</p>
+              )}
               <Row label="Until" value={new Date(unlockDate).toLocaleString()} />
               {penaltyBpsNum > 0 && <Row label="Early exit penalty" value={formatBps(penaltyBpsNum)} accent="orange" />}
             </div>

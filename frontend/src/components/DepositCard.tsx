@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { Deposit } from '../types'
-import { stroopsToXlm, formatUnlockDate, formatCountdown, formatBps, shortAddr, explorerAddrUrl } from '../lib/format'
+import { formatUnlockDate, formatCountdown, formatBps, shortAddr, explorerAddrUrl, formatTokenWithUsd, formatPriceUpdate } from '../lib/format'
+import { usePrice } from '../hooks/usePrice'
 import { CONFIG } from '../config'
 
 interface DepositCardProps {
@@ -12,6 +13,7 @@ interface DepositCardProps {
 
 export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: DepositCardProps) {
   const [showDetails, setShowDetails] = useState(false)
+  const { getPrice } = usePrice()
 
   const isXlm   = deposit.token === CONFIG.NATIVE_TOKEN
   const isUnlocked = deposit.timeRemaining === 0
@@ -23,6 +25,11 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
 
   const refundAmount = deposit.amount - penaltyAmount
 
+  // Get price for token (only XLM for now)
+  const priceData = isXlm ? getPrice('native') : null
+  const priceUsd = priceData?.usd
+  const priceUpdateStr = priceData ? formatPriceUpdate(priceData.lastUpdated) : null
+
   return (
     <div className="card p-5 hover:border-slate-600/80 transition-colors">
       {/* Top row */}
@@ -33,8 +40,13 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
             {isXlm ? 'XLM' : '?'}
           </div>
           <div className="min-w-0">
-            <p className="font-semibold text-base">{stroopsToXlm(deposit.amount)} {isXlm ? 'XLM' : 'tokens'}</p>
+            <p className="font-semibold text-base">
+              {formatTokenWithUsd(deposit.amount, isXlm ? 'XLM' : 'tokens', priceUsd)}
+            </p>
             <p className="text-xs text-slate-400 truncate">Deposit #{deposit.depositId}</p>
+            {priceUpdateStr && (
+              <p className="text-xs text-slate-500">{priceUpdateStr}</p>
+            )}
           </div>
         </div>
 
@@ -64,7 +76,7 @@ export function DepositCard({ deposit, onWithdraw, onCancel, txPending }: Deposi
       {/* Penalty info (if any) */}
       {hasPenalty && !isUnlocked && (
         <div className="mt-2 text-xs text-orange-400 bg-orange-900/20 rounded-lg px-3 py-2 border border-orange-800/30">
-          Early exit penalty: {formatBps(deposit.penaltyBps)} — you'd receive ~{stroopsToXlm(refundAmount)} {isXlm ? 'XLM' : 'tokens'}
+          Early exit penalty: {formatBps(deposit.penaltyBps)} — you'd receive ~{formatTokenWithUsd(refundAmount, isXlm ? 'XLM' : 'tokens', priceUsd)}
         </div>
       )}
 

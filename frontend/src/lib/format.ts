@@ -67,3 +67,66 @@ export function explorerTxUrl(txHash: string): string {
 export function explorerAddrUrl(addr: string): string {
   return `${CONFIG.EXPLORER_URL}/account/${addr}`
 }
+
+/**
+ * Convert stroops to USD value given a price in USD
+ * Returns formatted string like "$100.00" or null if price unavailable
+ */
+export function stroopsToUsd(stroops: bigint, priceUsd?: number): string | null {
+  if (!priceUsd || priceUsd < 0) return null
+
+  const xlmAmount = parseFloat(stroopsToXlm(stroops))
+  const usdValue = xlmAmount * priceUsd
+
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(usdValue)
+}
+
+/**
+ * Format a token amount with USD equivalent
+ * Returns: "100 XLM ($150.00)" or "100 XLM" if price unavailable
+ */
+export function formatTokenWithUsd(
+  amount: bigint,
+  tokenSymbol: string,
+  priceUsd?: number
+): string {
+  const tokenStr = `${stroopsToXlm(amount)} ${tokenSymbol}`
+
+  if (!priceUsd || priceUsd < 0) {
+    return tokenStr
+  }
+
+  const usdStr = stroopsToUsd(amount, priceUsd)
+  return usdStr ? `${tokenStr} (${usdStr})` : tokenStr
+}
+
+/**
+ * Format last price update time
+ * Returns: "updated 2 minutes ago" or "price outdated" if stale
+ */
+export function formatPriceUpdate(lastUpdated: number): string {
+  const age = Date.now() - lastUpdated
+  const ageSeconds = Math.floor(age / 1000)
+
+  if (ageSeconds < 60) {
+    return `updated ${ageSeconds}s ago`
+  }
+
+  const ageMinutes = Math.floor(ageSeconds / 60)
+  if (ageMinutes < 60) {
+    return `updated ${ageMinutes}m ago`
+  }
+
+  const ageHours = Math.floor(ageMinutes / 60)
+  if (ageHours < 24) {
+    return `updated ${ageHours}h ago`
+  }
+
+  const ageDays = Math.floor(ageHours / 24)
+  return `updated ${ageDays}d ago`
+}
