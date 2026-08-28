@@ -4,7 +4,6 @@
 
 import {
   Contract,
-  Networks,
   rpc as StellarRpc,
   TransactionBuilder,
   BASE_FEE,
@@ -12,10 +11,9 @@ import {
   Address,
   nativeToScVal,
   scValToNative,
-  type SorobanDataBuilder,
 } from '@stellar/stellar-sdk'
 import { CONFIG } from '../config'
-import type { VaultEntry, ContractResult } from '../types'
+import type { FaucetAsset, FaucetStatus, VaultEntry, ContractResult } from '../types'
 
 // ----------------------------------------------------------------
 //  RPC client (singleton)
@@ -206,6 +204,18 @@ export async function getLedgerTime(): Promise<number> {
   return result ?? Math.floor(Date.now() / 1000)
 }
 
+/** Fetch current ledger sequence number */
+export async function getLedgerSequence(): Promise<number> {
+  try {
+    const rpc = getRpc()
+    const latestLedger = await rpc.getLatestLedger()
+    return latestLedger.sequence
+  } catch (e) {
+    console.error('Failed to fetch ledger sequence:', e)
+    return 0
+  }
+}
+
 /** Fetch contract version */
 export async function getContractVersion(): Promise<string> {
   const result = await simulateReadOnly(
@@ -252,6 +262,46 @@ export async function getFeeRecipient(): Promise<string | null> {
   return result ?? null
 }
 
+export async function isTokenAllowed(token: string): Promise<boolean> {
+  const result = await simulateReadOnly(
+    'is_token_allowed',
+    [new Address(token).toScVal()],
+    (v) => scValToNative(v) as boolean,
+  )
+  return result ?? false
+}
+
+export async function getTokenVetting(token: string): Promise<TokenVettingRecord | null> {
+  return simulateReadOnly(
+    'get_token_vetting',
+    [new Address(token).toScVal()],
+    (v) => {
+      if (v.switch() === xdr.ScValType.scvVoid()) return null
+      const raw = scValToNative(v) as Record<string, unknown>
+      return {
+        proposer: raw['proposer'] as string,
+        proposedAt: Number(raw['proposed_at']),
+        reviewed: raw['reviewed'] as boolean,
+        reviewPassed: raw['review_passed'] as boolean,
+        reviewer: (raw['reviewer'] as string | null) ?? null,
+        reviewedAt: raw['reviewed_at'] == null ? null : Number(raw['reviewed_at']),
+        approved: raw['approved'] as boolean,
+      }
+    },
+  )
+}
+
+export async function getProposal(proposalId: number): Promise<Record<string, unknown> | null> {
+  return simulateReadOnly(
+    'get_proposal',
+    [nativeToScVal(proposalId, { type: 'u32' })],
+    (v) => {
+      if (v.switch() === xdr.ScValType.scvVoid()) return null
+      return scValToNative(v) as Record<string, unknown>
+    },
+  )
+}
+
 /** Fetch contract constants */
 export async function getConstants(): Promise<{ maxDeposit: bigint; maxLockSecs: number } | null> {
   return simulateReadOnly(
@@ -264,6 +314,19 @@ export async function getConstants(): Promise<{ maxDeposit: bigint; maxLockSecs:
   )
 }
 
+/** Fetch the contract storage schema version */
+export async function getStorageVersion(): Promise<number | null> {
+  const result = await simulateReadOnly(
+    'get_storage_version',
+    [],
+    (v) => {
+      if (v.switch() === xdr.ScValType.scvVoid()) return null
+      return Number(scValToNative(v))
+    },
+  )
+  return result ?? null
+}
+
 /** Fetch depositor count */
 export async function getDepositorCount(): Promise<number> {
   const result = await simulateReadOnly(
@@ -272,6 +335,26 @@ export async function getDepositorCount(): Promise<number> {
     (v) => Number(scValToNative(v)),
   )
   return result ?? 0
+}
+
+export async function getFaucetStatus(asset: FaucetAsset): Promise<FaucetStatus | null> {
+  return simulateReadOnly('get_faucet_status', [nativeToScVal(asset, { type: 'symbol' })], (v) => {
+    const raw = scValToNative(v) as Record<string, unknown>
+    return {
+      token: raw.token ? String(raw.token) : null,
+      balance: BigInt(raw.balance as string | number),
+      maxAmount: BigInt(raw.max_amount as string | number),
+      requestCount: Number(raw.request_count),
+      distributed: BigInt(raw.distributed as string | number),
+    }
+  })
+}
+
+export async function getFaucetLastRequest(account: string): Promise<number | null> {
+  return simulateReadOnly('get_faucet_last_request', [new Address(account).toScVal()], (v) => {
+    if (v.switch() === xdr.ScValType.scvVoid()) return null
+    return Number(scValToNative(v))
+  }, account)
 }
 
 // ----------------------------------------------------------------
@@ -367,6 +450,22 @@ export async function buildDeposit(
   ])
 }
 
+export async function buildDepositByLedger(
+  depositor: string,
+  tokenAddress: string,
+  amount: bigint,
+  unlockLedger: number,
+  penaltyBps: number,
+): Promise<string | null> {
+  return buildTx(depositor, 'deposit_by_ledger', [
+    new Address(depositor).toScVal(),
+    new Address(tokenAddress).toScVal(),
+    nativeToScVal(amount, { type: 'i128' }),
+    nativeToScVal(unlockLedger, { type: 'u32' }),
+    nativeToScVal(penaltyBps, { type: 'u32' }),
+  ])
+}
+
 export async function buildWithdraw(
   depositor: string,
   depositId: number,
@@ -393,6 +492,57 @@ export async function buildPause(admin: string): Promise<string | null> {
 
 export async function buildUnpause(admin: string): Promise<string | null> {
   return buildTx(admin, 'unpause', [new Address(admin).toScVal()])
+}
+
+export async function buildProposeToken(proposer: string, token: string): Promise<string | null> {
+  return buildTx(proposer, 'propose_token', [
+    new Address(proposer).toScVal(),
+    new Address(token).toScVal(),
+  ])
+}
+
+export async function buildReviewToken(admin: string, token: string, passed: boolean): Promise<string | null> {
+  return buildTx(admin, 'review_token', [
+    new Address(admin).toScVal(),
+    new Address(token).toScVal(),
+    nativeToScVal(passed, { type: 'bool' }),
+  ])
+}
+
+export async function buildApproveToken(admin: string, token: string): Promise<string | null> {
+  return buildTx(admin, 'approve_token', [
+    new Address(admin).toScVal(),
+    new Address(token).toScVal(),
+  ])
+}
+
+export async function buildProposePause(
+  proposer: string,
+  mode: 'AdminVote' | 'CommunityVote',
+): Promise<string | null> {
+  return buildTx(proposer, 'propose_pause', [
+    new Address(proposer).toScVal(),
+    nativeToScVal(mode, { type: 'symbol' }),
+  ])
+}
+
+export async function buildGovernanceVote(
+  voter: string,
+  proposalId: number,
+  support: boolean,
+): Promise<string | null> {
+  return buildTx(voter, 'vote', [
+    nativeToScVal(proposalId, { type: 'u32' }),
+    new Address(voter).toScVal(),
+    nativeToScVal(support, { type: 'bool' }),
+  ])
+}
+
+export async function buildExecuteProposal(
+  caller: string,
+  proposalId: number,
+): Promise<string | null> {
+  return buildTx(caller, 'execute_proposal', [nativeToScVal(proposalId, { type: 'u32' })])
 }
 
 export async function buildEmergencyWithdraw(
@@ -503,6 +653,18 @@ export async function getTokenDecimals(tokenAddress: string): Promise<number | n
     console.warn(`Failed to fetch decimals for ${tokenAddress}:`, e)
     return null
   }
+}
+
+/**
+ * Fetch the symbol of a token.
+ * For native XLM returns "XLM", for SAC tokens calls the contract's symbol() method.
+ *
+ * @param tokenAddress - Stellar token contract address
+ * @returns Symbol string, or null if fetch fails
+ */
+export async function getTokenSymbol(tokenAddress: string): Promise<string | null> {
+  const metadata = await getTokenMetadata(tokenAddress)
+  return metadata?.symbol ?? null
 }
 
 /**

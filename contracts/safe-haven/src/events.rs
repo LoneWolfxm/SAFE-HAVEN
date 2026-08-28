@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, Env, Symbol};
+use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
 pub fn contract_initialized(
     env: &Env,
@@ -8,23 +8,70 @@ pub fn contract_initialized(
     max_lock_secs: u64,
 ) {
     let topics = (Symbol::new(env, "initialized"),);
-    env.events()
-        .publish(topics, (admin.clone(), fee_recipient.clone(), max_deposit, max_lock_secs));
+    env.events().publish(
+        topics,
+        (
+            admin.clone(),
+            fee_recipient.clone(),
+            max_deposit,
+            max_lock_secs,
+        ),
+    );
 }
 
-pub fn deposit(env: &Env, depositor: &Address, token: &Address, amount: i128, unlock_time: u64, deposit_id: u32) {
+pub fn deposit(
+    env: &Env,
+    depositor: &Address,
+    token: &Address,
+    amount: i128,
+    unlock_time: u64,
+    deposit_id: u32,
+) {
     let topics = (symbol_short!("deposit"), depositor.clone(), token.clone());
-    env.events().publish(topics, (amount, unlock_time, deposit_id));
+    env.events()
+        .publish(topics, (amount, unlock_time, deposit_id));
 }
 
-pub fn deposit_by_ledger(env: &Env, depositor: &Address, token: &Address, amount: i128, unlock_ledger: u32, deposit_id: u32) {
-    let topics = (Symbol::new(env, "dep_by_ledger"), depositor.clone(), token.clone());
-    env.events().publish(topics, (amount, unlock_ledger, deposit_id));
+pub fn deposit_by_ledger(
+    env: &Env,
+    depositor: &Address,
+    token: &Address,
+    amount: i128,
+    unlock_ledger: u32,
+    deposit_id: u32,
+) {
+    let topics = (
+        Symbol::new(env, "dep_by_ledger"),
+        depositor.clone(),
+        token.clone(),
+    );
+    env.events()
+        .publish(topics, (amount, unlock_ledger, deposit_id));
+}
+
+/// Emitted when a multi-token deposit is created (issue #330).
+/// `token_count` is the number of distinct tokens in the vault.
+pub fn multi_deposit(
+    env: &Env,
+    depositor: &Address,
+    token_count: u32,
+    unlock_time: u64,
+    deposit_id: u32,
+) {
+    let topics = (Symbol::new(env, "multi_deposit"), depositor.clone());
+    env.events()
+        .publish(topics, (token_count, unlock_time, deposit_id));
 }
 
 pub fn withdraw(env: &Env, depositor: &Address, token: &Address, amount: i128, deposit_id: u32) {
     let topics = (symbol_short!("withdraw"), depositor.clone(), token.clone());
     env.events().publish(topics, (amount, deposit_id));
+}
+
+/// Emitted when a multi-token deposit is withdrawn (issue #330).
+pub fn multi_withdraw(env: &Env, depositor: &Address, recipient: &Address, deposit_id: u32, token_count: u32) {
+    let topics = (Symbol::new(env, "multi_wdraw"), depositor.clone());
+    env.events().publish(topics, (recipient.clone(), deposit_id, token_count));
 }
 
 pub fn emergency_withdraw(
@@ -35,8 +82,6 @@ pub fn emergency_withdraw(
     amount: i128,
     deposit_id: u32,
 ) {
-    // admin is placed in the data payload rather than topics to avoid
-    // leaking the admin address in the publicly-indexed event topic stream.
     let topics = (Symbol::new(env, "emrg_wdraw"), depositor.clone());
     env.events()
         .publish(topics, (admin.clone(), token.clone(), amount, deposit_id));
@@ -62,14 +107,10 @@ pub fn admin_renounced(env: &Env, former_admin: &Address) {
     env.events().publish(topics, ());
 }
 
-pub fn lock_extended(
-    env: &Env,
-    depositor: &Address,
-    old_unlock_time: u64,
-    new_unlock_time: u64,
-) {
+pub fn lock_extended(env: &Env, depositor: &Address, old_unlock_time: u64, new_unlock_time: u64) {
     let topics = (Symbol::new(env, "lock_extended"), depositor.clone());
-    env.events().publish(topics, (old_unlock_time, new_unlock_time));
+    env.events()
+        .publish(topics, (old_unlock_time, new_unlock_time));
 }
 
 pub fn deposit_cancelled(
@@ -98,6 +139,36 @@ pub fn unpaused(env: &Env, admin: &Address) {
     env.events().publish(topics, ());
 }
 
+pub fn token_proposed(env: &Env, token: &Address, proposer: &Address) {
+    let topics = (Symbol::new(env, "token_proposed"), token.clone());
+    env.events().publish(topics, proposer.clone());
+}
+
+pub fn token_reviewed(env: &Env, token: &Address, reviewer: &Address, passed: bool) {
+    let topics = (Symbol::new(env, "token_reviewed"), token.clone());
+    env.events().publish(topics, (reviewer.clone(), passed));
+}
+
+pub fn token_approved(env: &Env, token: &Address, approver: &Address) {
+    let topics = (Symbol::new(env, "token_approved"), token.clone());
+    env.events().publish(topics, approver.clone());
+}
+
+pub fn governance_proposed(env: &Env, proposal_id: u32, proposer: &Address) {
+    let topics = (Symbol::new(env, "gov_proposed"), proposal_id);
+    env.events().publish(topics, proposer.clone());
+}
+
+pub fn governance_voted(env: &Env, proposal_id: u32, voter: &Address, support: bool, weight: i128) {
+    let topics = (Symbol::new(env, "gov_voted"), proposal_id, voter.clone());
+    env.events().publish(topics, (support, weight));
+}
+
+pub fn governance_executed(env: &Env, proposal_id: u32) {
+    let topics = (Symbol::new(env, "gov_executed"), proposal_id);
+    env.events().publish(topics, ());
+}
+
 pub fn withdraw_to(
     env: &Env,
     depositor: &Address,
@@ -105,6 +176,34 @@ pub fn withdraw_to(
     token: &Address,
     amount: i128,
 ) {
-    let topics = (Symbol::new(env, "withdraw_to"), depositor.clone(), token.clone());
+    let topics = (
+        Symbol::new(env, "withdraw_to"),
+        depositor.clone(),
+        token.clone(),
+    );
     env.events().publish(topics, (recipient.clone(), amount));
+}
+
+/// Emitted when the withdrawal whitelist is set for a deposit (issue #331).
+pub fn whitelist_set(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    whitelist: &Vec<Address>,
+) {
+    let topics = (Symbol::new(env, "wl_set"), depositor.clone());
+    env.events().publish(topics, (deposit_id, whitelist.len()));
+}
+
+/// Emitted when compound interest is accrued (issue #332).
+pub fn interest_accrued(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    old_amount: i128,
+    new_amount: i128,
+) {
+    let topics = (Symbol::new(env, "interest"), depositor.clone());
+    env.events()
+        .publish(topics, (deposit_id, old_amount, new_amount));
 }

@@ -27,6 +27,7 @@ import { CONFIG } from '../config'
 
 interface WalletContextValue {
   wallet: WalletInfo | null
+  wallets: WalletInfo[]
   isConnecting: boolean
   isRestoringSession: boolean
   networkMismatch: boolean
@@ -60,6 +61,7 @@ function initializeWalletFromStorage(): [WalletInfo | null, boolean] {
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [wallet, setWallet]           = useState<WalletInfo | null>(null)
+  const [wallets, setWallets]         = useState<WalletInfo[]>([])
   const [isConnecting, setConnecting] = useState(false)
   const walletKitRef = useRef<StellarWalletsKit | null>(null)
 
@@ -92,6 +94,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     if (!walletKitRef.current) return
 
     const saved = localStorage.getItem('tlv_wallet_address')
+    const savedWallets = localStorage.getItem('tlv_wallets')
+    let restoredWallets: WalletInfo[] = []
+    try {
+      restoredWallets = savedWallets ? JSON.parse(savedWallets) as WalletInfo[] : []
+    } catch {
+      localStorage.removeItem('tlv_wallets')
+    }
+    if (saved && !restoredWallets.some((item) => item.address === saved)) {
+      restoredWallets = [{ address: saved, displayAddress: shortAddr(saved) }, ...restoredWallets]
+    }
+    setWallets(restoredWallets)
     if (!saved) return
 
     const restore = async () => {
@@ -174,7 +187,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setNetworkMismatch(false)
     localStorage.removeItem('tlv_wallet_address')
     toast.success('Wallet disconnected')
-  }, [])
+  }, [persistWallets, wallet, wallets])
+
+  const switchWallet = useCallback((address: string) => {
+    const next = wallets.find((item) => item.address === address)
+    if (!next) return
+    setWallet(next)
+    localStorage.setItem('tlv_wallet_address', next.address)
+  }, [wallets])
 
   const signTransaction = useCallback(async (txXdr: string): Promise<SigningResult> => {
     // Check for network mismatch before attempting to sign

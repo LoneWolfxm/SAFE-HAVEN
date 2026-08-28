@@ -44,6 +44,19 @@ export const CONFIG = {
 
   /** Stroops per XLM */
   STROOPS_PER_XLM: 10_000_000,
+
+  // ============================================================
+  //  Fiat On-Ramp Configuration (Ramp Network)
+  // ============================================================
+
+  /** Ramp Network API key for embedded widget */
+  RAMP_API_KEY: (import.meta.env.VITE_RAMP_API_KEY as string) ?? '',
+
+  /** Ramp environment: "production" or "staging" (default: staging for testing) */
+  RAMP_ENVIRONMENT: (import.meta.env.VITE_RAMP_ENVIRONMENT as 'production' | 'staging') ?? 'staging',
+
+  /** Whether Ramp on-ramp is enabled (requires API key) */
+  RAMP_ENABLED: !!(import.meta.env.VITE_RAMP_API_KEY as string),
 } as const
 
 // ============================================================
