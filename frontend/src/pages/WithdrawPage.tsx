@@ -3,6 +3,7 @@ import toast from 'react-hot-toast'
 import { useWallet } from '../context/WalletContext'
 import { useContractLogs } from '../context/ContractLogsContext'
 import { TxStatusBadge } from '../components/TxStatusBadge'
+import { TwoFAVerification } from '../components/TwoFAVerification'
 import { buildWithdraw, buildCancelDeposit, submitTx, getVault, getTimeRemaining } from '../lib/stellar'
 import { stroopsToXlm, formatUnlockDate, formatCountdown, formatBps } from '../lib/format'
 import { useTokenSymbol } from '../hooks/useTokenSymbol'
@@ -131,6 +132,20 @@ export function WithdrawPage() {
 
     const id = parseInt(depositId, 10)
 
+    // Check if 2FA is required
+    if (twoFAState.enabled) {
+      setPendingMethod(method)
+      setShow2FA(true)
+      return
+    }
+
+    // Proceed without 2FA
+    await executeTransaction(method, id)
+  }
+
+  async function executeTransaction(method: 'withdraw' | 'cancel', depositId: number) {
+    if (!wallet) return
+
     setTxStatus('signing')
     setTxError(undefined)
     setTxHash(undefined)
@@ -145,8 +160,8 @@ export function WithdrawPage() {
 
     try {
       const xdr = method === 'withdraw'
-        ? await buildWithdraw(wallet.address, id)
-        : await buildCancelDeposit(wallet.address, id)
+        ? await buildWithdraw(wallet.address, depositId)
+        : await buildCancelDeposit(wallet.address, depositId)
 
       if (!xdr) throw new Error('Failed to build transaction')
 

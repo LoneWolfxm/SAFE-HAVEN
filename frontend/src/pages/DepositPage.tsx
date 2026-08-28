@@ -9,6 +9,7 @@ import { formatBps, formatDuration, dateTimeLocalToUnixSeconds, getMinDateTimeLo
 import type { TxStatus } from '../types'
 import type { ContractInfo } from '../App'
 import { CONFIG } from '../config'
+import { Address, nativeToScVal } from '@stellar/stellar-sdk'
 
 type DepositTab = 'timestamp' | 'ledger'
 
@@ -103,6 +104,39 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
     penalty:   isNaN(penaltyBpsNum) || penaltyBpsNum < 0 || penaltyBpsNum > 10_000 ? '0–10000 only' : '',
   }
   const isValid = amount && unlockDate && !errors.amount && !errors.unlock && !errors.penalty && !contractInfo.paused && !decimalsLoading
+
+  // Estimate gas when inputs change
+  useEffect(() => {
+    if (!wallet || !isValid) {
+      setGasEstimate(null)
+      return
+    }
+
+    const estimateAsync = async () => {
+      setIsEstimating(true)
+      try {
+        const amountStroops = xlmToStroops(amount)
+        const args = [
+          new Address(wallet.address).toScVal(),
+          new Address(tokenAddress).toScVal(),
+          nativeToScVal(amountStroops, { type: 'i128' }),
+          nativeToScVal(unlockTimestamp, { type: 'u64' }),
+          nativeToScVal(penaltyBpsNum, { type: 'u32' }),
+        ]
+        const result = await estimateGas(wallet.address, 'deposit', args)
+        setGasEstimate(result)
+      } catch (e) {
+        console.error('Gas estimation failed:', e)
+        setGasEstimate({ success: false })
+      } finally {
+        setIsEstimating(false)
+      }
+    }
+
+    // Debounce estimation
+    const timer = setTimeout(() => void estimateAsync(), 500)
+    return () => clearTimeout(timer)
+  }, [wallet, amount, tokenAddress, unlockTimestamp, penaltyBpsNum, isValid, estimateGas])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
