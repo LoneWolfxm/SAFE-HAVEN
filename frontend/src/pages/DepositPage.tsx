@@ -163,13 +163,13 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
   }
 
   return (
-    <div className="max-w-lg">
+    <div className="max-w-lg mx-auto">
       {/* Tab Navigation */}
       <div className="mb-6 flex gap-2">
         <button
           onClick={() => setDepositTab('timestamp')}
           className={[
-            'flex-1 px-4 py-2 rounded-lg font-medium transition-all text-sm',
+            'flex-1 px-3 md:px-4 py-2 rounded-lg font-medium transition-all text-xs md:text-sm min-h-10',
             depositTab === 'timestamp'
               ? 'bg-stellar-600 text-white shadow-sm'
               : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-700/60 hover:border-slate-600',
@@ -178,12 +178,13 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
           <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 inline mr-2">
             <path d="M5.5 13a3.5 3.5 0 01-.369-6.98 4 4 0 117.753-1 4.5 4.5 0 11-4.384 5.98z" />
           </svg>
-          By Timestamp
+          <span className="hidden sm:inline">By Timestamp</span>
+          <span className="sm:hidden">Time</span>
         </button>
         <button
           onClick={() => setDepositTab('ledger')}
           className={[
-            'flex-1 px-4 py-2 rounded-lg font-medium transition-all text-sm',
+            'flex-1 px-3 md:px-4 py-2 rounded-lg font-medium transition-all text-xs md:text-sm min-h-10',
             depositTab === 'ledger'
               ? 'bg-stellar-600 text-white shadow-sm'
               : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-700/60 hover:border-slate-600',
@@ -192,28 +193,29 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
           <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 inline mr-2">
             <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
           </svg>
-          By Ledger
+          <span className="hidden sm:inline">By Ledger</span>
+          <span className="sm:hidden">Ledger</span>
         </button>
       </div>
 
       {/* Timestamp-based Deposit Form */}
       {depositTab === 'timestamp' && (
-        <div className="card p-6">
-          <h2 className="font-semibold text-lg mb-1">Lock tokens in a vault</h2>
-          <p className="text-sm text-slate-400 mb-6">
-            Tokens will be transferred to the contract and locked until your chosen date.
+        <div className="card p-4 md:p-6">
+          <h2 className="font-semibold text-base md:text-lg mb-1">Lock tokens in a vault</h2>
+          <p className="text-xs md:text-sm text-slate-400 mb-4 md:mb-6">
+            Tokens will be locked until your chosen date.
           </p>
 
           {contractInfo.paused && (
-            <div className="mb-5 p-3 rounded-xl bg-red-900/30 border border-red-700/40 text-red-400 text-sm">
-              ⚠️ Contract is currently paused. Deposits are disabled.
+            <div className="mb-4 md:mb-5 p-3 rounded-lg md:rounded-xl bg-red-900/30 border border-red-700/40 text-red-400 text-xs md:text-sm">
+              ⚠️ Contract is paused. Deposits disabled.
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+          <form onSubmit={handleSubmit} className="space-y-4 md:space-y-5" noValidate>
             {/* Token */}
             <div>
-              <label className="label">Token contract address</label>
+              <label className="label">Token address</label>
               <div className="relative">
                 <input
                   className={`input ${
@@ -230,12 +232,12 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
                   disabled={isPending}
                 />
                 {decimalsLoading && (
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs">
+                  <span className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 text-slate-400 text-xs">
                     Verifying…
                   </span>
                 )}
                 {!decimalsLoading && tokenAddress && isValidContractAddress(tokenAddress) && !tokenAddressError && (
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-green-400 text-xs">
+                  <span className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 text-green-400 text-xs">
                     ✓
                   </span>
                 )}
@@ -243,11 +245,11 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
               {tokenAddressError ? (
                 <p className="text-xs text-red-400 mt-1">{tokenAddressError}</p>
               ) : (
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500 mt-1 leading-snug">
                   {tokenAddress === CONFIG.NATIVE_TOKEN
-                    ? 'Native XLM token (7 decimals)'
+                    ? 'XLM (7 decimals)'
                     : tokenMetadata
-                      ? `${tokenMetadata.symbol} - ${tokenMetadata.name} (${tokenDecimals} decimals)`
+                      ? `${tokenMetadata.symbol} (${tokenDecimals} decimals)`
                       : `Custom token (${tokenDecimals} decimals${decimalsLoading ? ', verifying…' : ''})`}
                 </p>
               )}
@@ -258,7 +260,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
               <label className="label">Amount</label>
               <div className="relative">
                 <input
-                  className={`input pr-14 ${errors.amount ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
+                  className={`input pr-12 md:pr-14 ${errors.amount ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
                   type="number"
                   min="0"
                   step={`0.${'0'.repeat(Math.max(0, tokenDecimals - 1))}1`}
@@ -267,7 +269,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
                   placeholder="0"
                   disabled={isPending || decimalsLoading}
                 />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm font-medium pointer-events-none">
+                <span className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 text-slate-500 text-xs md:text-sm font-medium pointer-events-none">
                   {tokenAddress === CONFIG.NATIVE_TOKEN ? 'XLM' : 'tokens'}
                 </span>
               </div>
@@ -276,10 +278,10 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
 
             {/* Unlock date */}
             <div>
-              <label className="label">
+              <label className="label text-xs">
                 Unlock date & time
-                <span className="ml-1 text-slate-500 normal-case">— {getTimezoneOffsetString()}</span>
               </label>
+              <p className="text-xs text-slate-500 mb-1.5">{getTimezoneOffsetString()}</p>
               <input
                 className={`input ${errors.unlock ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
                 type="datetime-local"
@@ -293,13 +295,13 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
 
             {/* Penalty BPS */}
             <div>
-              <label className="label">
-                Early exit penalty (basis points)
-                <span className="ml-1 text-slate-500 normal-case">— 0 = no penalty, 10000 = 100%</span>
+              <label className="label text-xs">
+                Early exit penalty (bps)
               </label>
+              <p className="text-xs text-slate-500 mb-1.5">0–10000 (0% = no penalty)</p>
               <div className="relative">
                 <input
-                  className={`input pr-20 ${errors.penalty ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
+                  className={`input pr-12 ${errors.penalty ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : ''}`}
                   type="number"
                   min="0"
                   max="10000"
@@ -308,7 +310,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
                   onChange={(e) => setPenaltyBps(e.target.value)}
                   disabled={isPending}
                 />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 text-sm pointer-events-none">
+                <span className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 text-slate-500 text-xs font-medium pointer-events-none">
                   {isNaN(penaltyBpsNum) ? '—' : formatBps(penaltyBpsNum)}
                 </span>
               </div>
@@ -317,7 +319,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
 
             {/* Summary */}
             {amount && unlockDate && !errors.amount && !errors.unlock && (
-              <div className="bg-slate-800/60 rounded-xl p-4 text-sm space-y-1.5">
+              <div className="bg-slate-800/60 rounded-lg md:rounded-xl p-3 md:p-4 text-xs md:text-sm space-y-1">
                 <p className="text-slate-400 text-xs uppercase tracking-wide font-medium mb-2">Summary</p>
                 <Row label="Locking" value={`${amount} XLM`} />
                 {(() => {
@@ -329,7 +331,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
                     </>
                   )
                 })()}
-                {penaltyBpsNum > 0 && <Row label="Early exit penalty" value={formatBps(penaltyBpsNum)} accent="orange" />}
+                {penaltyBpsNum > 0 && <Row label="Early penalty" value={formatBps(penaltyBpsNum)} accent="orange" />}
               </div>
             )}
 
@@ -337,7 +339,7 @@ export function DepositPage({ contractInfo, onSuccess }: DepositPageProps) {
 
             <button
               type="submit"
-              className="btn-primary w-full"
+              className="btn-primary w-full text-sm md:text-base py-2.5 min-h-11 md:min-h-auto"
               disabled={!isValid || isPending}
             >
               {isPending ? (
